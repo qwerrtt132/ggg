@@ -60,6 +60,14 @@ except ImportError:
 from rules_database import RulesEngine, RULES, SYMPTOM_KEYS
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SELF-CORRECTION THRESHOLDS (extracted constants for maintainability)
+# ─────────────────────────────────────────────────────────────────────────────
+# Maximum confluence count allowed by the self-corrector (Rule 256 – may miss trades)
+MAX_CONFLUENCES: int = 5
+# Win-rate below this % causes the corrector to recommend disabling a pattern
+MIN_CONFLUENCE_WIN_RATE: float = 30.0
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PATHS
 # ─────────────────────────────────────────────────────────────────────────────
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
@@ -726,9 +734,10 @@ class PositionManager:
                 # Partial close
                 if tp_idx == 0:
                     close_pct = config.get("partial_close_tp1_pct", 0.5)
-                    # Breakeven (Rule – "Move to BE at TP1")
-                    if config.get("breakeven_at_tp1", True):
-                        trade.stop_loss    = trade.entry_price
+                    # Move stop to breakeven at TP1 (Rule: "Move to BE at TP1").
+                    # Guard: closed_tps check above ensures this runs only once.
+                    if config.get("breakeven_at_tp1", True) and not trade.breakeven_set:
+                        trade.stop_loss     = trade.entry_price
                         trade.breakeven_set = True
                 elif tp_idx == 1:
                     close_pct = config.get("partial_close_tp2_pct", 0.3)
@@ -1093,7 +1102,7 @@ class SelfCorrector:
         osb_count = symptom_freq.get("only_sweep_bos", 0)
         current_min = config.get("min_confluences", 3)
 
-        if (lc_count >= 2 or osb_count >= 2) and current_min < 5:
+        if (lc_count >= 2 or osb_count >= 2) and current_min < MAX_CONFLUENCES:
             new_min = current_min + 1
             violated = self.engine.find_by_symptoms(
                 ["low_confluence", "only_sweep_bos"])
@@ -1131,7 +1140,7 @@ class SelfCorrector:
             })
 
         # ── Recommendation: disable low-performing confluence pattern ──────
-        poor_types = [k for k, wr in type_wr.items() if wr < 30.0]
+        poor_types = [k for k, wr in type_wr.items() if wr < MIN_CONFLUENCE_WIN_RATE]
         for pt in poor_types:
             # Build the pattern string that scan() would produce
             recs.append({

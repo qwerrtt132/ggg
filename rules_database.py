@@ -1294,7 +1294,11 @@ class RulesEngine:
         return len(self._rules)
 
     def categories(self) -> List[str]:
-        seen: Dict[str, None] = {}
+        seen: set = set()
+        order: List[str] = []
         for r in self._rules:
-            seen[r["category"]] = None
-        return list(seen.keys())
+            cat = r["category"]
+            if cat not in seen:
+                seen.add(cat)
+                order.append(cat)
+        return order
