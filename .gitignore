@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+tjr_config.json
+tjr_journal.json
+*.egg-info/
+.env

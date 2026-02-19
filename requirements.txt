@@ -1,0 +1,4 @@
+yfinance>=0.2.18
+pandas>=1.5.0
+numpy>=1.23.0
+pytz>=2023.3
