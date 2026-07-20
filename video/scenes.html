@@ -1,0 +1,270 @@
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg0: #05070f;
+    --bg1: #0c1226;
+    --green: #16e29a;
+    --green-glow: rgba(22,226,154,.55);
+    --red: #ff5470;
+    --blue: #4d8dff;
+    --ink: #f4f8ff;
+    --muted: #8ea0c4;
+  }
+  html, body { background: #000; }
+  /* Fit wrapper: at the 1080x1920 recording viewport scale === 1 (no effect);
+     in a smaller browser/preview it scales the stage down to fit. */
+  .fit { display: grid; place-content: center; min-height: 100vh; }
+  .stage {
+    position: relative;
+    width: 1080px;
+    height: 1920px;
+    margin: 0 auto;
+    transform: scale(var(--s, 1));
+    transform-origin: center;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    color: var(--ink);
+    background:
+      radial-gradient(120% 80% at 50% -10%, #16224a 0%, rgba(12,18,38,0) 55%),
+      radial-gradient(90% 60% at 50% 110%, #0b2f28 0%, rgba(5,7,15,0) 60%),
+      linear-gradient(180deg, var(--bg1) 0%, var(--bg0) 100%);
+  }
+
+  /* animated grid backdrop */
+  .grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(77,141,255,.08) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(77,141,255,.08) 1px, transparent 1px);
+    background-size: 90px 90px;
+    mask-image: radial-gradient(80% 70% at 50% 45%, #000 40%, transparent 100%);
+    animation: drift 8s linear infinite;
+  }
+  @keyframes drift { to { background-position: 90px 90px; } }
+
+  .scene {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 120px 90px;
+    text-align: center;
+    opacity: 0;
+    transform: translateY(40px) scale(.98);
+    transition: opacity .5s ease, transform .5s ease;
+    pointer-events: none;
+  }
+  .scene.active { opacity: 1; transform: translateY(0) scale(1); }
+
+  .kicker {
+    font-size: 34px; letter-spacing: 6px; text-transform: uppercase;
+    color: var(--muted); font-weight: 700; margin-bottom: 34px;
+  }
+  h1 { font-size: 118px; line-height: 1.02; font-weight: 900; letter-spacing: -2px; }
+  h2 { font-size: 92px; line-height: 1.05; font-weight: 900; letter-spacing: -1px; }
+  .sub { font-size: 46px; color: var(--muted); margin-top: 40px; font-weight: 600; line-height: 1.3; max-width: 820px; }
+  .green { color: var(--green); }
+  .red { color: var(--red); }
+  .blue { color: var(--blue); }
+  .glow { text-shadow: 0 0 40px var(--green-glow); }
+
+  .emoji { font-size: 180px; line-height: 1; margin-bottom: 20px; filter: drop-shadow(0 20px 40px rgba(0,0,0,.5)); }
+  .pop { animation: pop .6s cubic-bezier(.2,1.4,.4,1) both; }
+  @keyframes pop { from { transform: scale(.3); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+
+  /* ---- step number badge ---- */
+  .badge {
+    width: 150px; height: 150px; border-radius: 40px;
+    display: grid; place-items: center;
+    font-size: 90px; font-weight: 900;
+    background: linear-gradient(135deg, var(--green), #0bbf82);
+    color: #04120c; box-shadow: 0 24px 60px var(--green-glow);
+    margin-bottom: 44px;
+  }
+
+  /* ---- candlestick chart ---- */
+  .chart { display: flex; align-items: flex-end; gap: 18px; height: 640px; margin-top: 20px; }
+  .candle { position: relative; width: 44px; border-radius: 8px; opacity: 0; transform: translateY(30px);
+            animation: rise .5s ease forwards; }
+  .candle.up { background: var(--green); box-shadow: 0 0 30px var(--green-glow); }
+  .candle.down { background: var(--red); box-shadow: 0 0 30px rgba(255,84,112,.4); }
+  .candle .wick { position: absolute; left: 50%; transform: translateX(-50%); width: 6px; background: inherit; border-radius: 4px; }
+  @keyframes rise { to { opacity: 1; transform: translateY(0); } }
+
+  /* ---- rule card ---- */
+  .rule {
+    background: rgba(255,255,255,.05); border: 2px solid rgba(77,141,255,.35);
+    border-radius: 34px; padding: 50px 60px; margin-top: 20px;
+    font-size: 58px; font-weight: 800; line-height: 1.35; max-width: 880px;
+    box-shadow: 0 30px 80px rgba(0,0,0,.5); backdrop-filter: blur(6px);
+  }
+  .rule .tag { display:inline-block; padding: 6px 24px; border-radius: 999px; font-size: 40px; margin: 0 6px; }
+  .tag.if { background: rgba(77,141,255,.2); color: var(--blue); }
+  .tag.buy { background: rgba(22,226,154,.2); color: var(--green); }
+
+  /* ---- counter ---- */
+  .counter { font-size: 200px; font-weight: 900; letter-spacing: -4px; font-variant-numeric: tabular-nums; }
+
+  /* ---- pills row ---- */
+  .pills { display: flex; flex-wrap: wrap; gap: 24px; justify-content: center; margin-top: 50px; max-width: 900px; }
+  .pill { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12);
+          border-radius: 999px; padding: 24px 44px; font-size: 44px; font-weight: 700; }
+
+  /* progress bar */
+  .bar { position: absolute; left: 0; bottom: 0; height: 12px; width: 0; background: linear-gradient(90deg, var(--green), var(--blue)); box-shadow: 0 0 20px var(--green-glow); }
+
+  .handle { position: absolute; bottom: 70px; width: 100%; text-align: center; font-size: 40px; font-weight: 800; color: var(--muted); letter-spacing: 1px; }
+</style>
+
+<div class="fit">
+<div class="stage" id="stage">
+  <div class="grid"></div>
+
+  <!-- 0 : HOOK -->
+  <section class="scene" data-scene="0">
+    <div class="emoji pop">🤖📈</div>
+    <div class="kicker">In 30 seconds</div>
+    <h1>How do <span class="green glow">computers</span> trade stocks by themselves?</h1>
+  </section>
+
+  <!-- 1 : DEFINITION -->
+  <section class="scene" data-scene="1">
+    <div class="kicker">The basics</div>
+    <h2><span class="green">Algorithmic trading</span> = code that buys &amp; sells using <span class="blue">rules</span>, not feelings.</h2>
+    <p class="sub">No fear. No greed. Just math running at machine speed.</p>
+  </section>
+
+  <!-- 2 : STEP 1 DATA -->
+  <section class="scene" data-scene="2">
+    <div class="badge">1</div>
+    <h2>It reads the <span class="blue">data</span></h2>
+    <div class="chart" id="chart"></div>
+    <p class="sub">Live prices, volume, news &amp; patterns — thousands of times a second.</p>
+  </section>
+
+  <!-- 3 : STEP 2 RULES -->
+  <section class="scene" data-scene="3">
+    <div class="badge">2</div>
+    <h2>It follows a <span class="green">strategy</span></h2>
+    <div class="rule">
+      <span class="tag if">IF</span> price dips 2% <span class="blue">AND</span> volume spikes<br>
+      <span class="tag buy">→ BUY</span>
+    </div>
+    <p class="sub">Signals are backtested on years of history before real money moves.</p>
+  </section>
+
+  <!-- 4 : STEP 3 EXECUTION -->
+  <section class="scene" data-scene="4">
+    <div class="badge">3</div>
+    <h2>It executes in <span class="green glow">milliseconds</span></h2>
+    <div class="counter" id="counter">0</div>
+    <p class="sub">trades placed while you blink — faster than any human hand.</p>
+  </section>
+
+  <!-- 5 : WHY IT MATTERS -->
+  <section class="scene" data-scene="5">
+    <div class="kicker">Why it matters</div>
+    <h2>Algorithms drive most of the <span class="green">market</span>.</h2>
+    <div class="pills">
+      <div class="pill">⚡ ~70% of volume</div>
+      <div class="pill">🧠 zero emotion</div>
+      <div class="pill">🌍 trades 24/7</div>
+    </div>
+  </section>
+
+  <!-- 6 : CTA -->
+  <section class="scene" data-scene="6">
+    <div class="emoji pop">📊</div>
+    <h1>Now you get <span class="green glow">algo trading.</span></h1>
+    <p class="sub">Follow for more money &amp; tech in 30s ⬇️</p>
+  </section>
+
+  <div class="handle">@yourhandle</div>
+  <div class="bar" id="bar"></div>
+</div>
+</div>
+
+<script>
+  // Scale the 1080x1920 stage to fit the viewport (=1 at the recording size).
+  function fit() {
+    const s = Math.min(window.innerWidth / 1080, window.innerHeight / 1920);
+    document.documentElement.style.setProperty('--s', s);
+    const st = document.getElementById('stage');
+    if (st) st.parentElement.style.height = (1920 * s) + 'px';
+  }
+  window.addEventListener('resize', fit); fit();
+</script>
+<script>
+  // ---- Timeline (ms). Total = 30s ----
+  const scenes = [
+    { at: 0,     dur: 4000 },  // hook
+    { at: 4000,  dur: 5000 },  // definition
+    { at: 9000,  dur: 5000 },  // data
+    { at: 14000, dur: 5000 },  // rules
+    { at: 19000, dur: 5000 },  // execution
+    { at: 24000, dur: 4000 },  // why
+    { at: 28000, dur: 2000 },  // cta
+  ];
+  const TOTAL = 30000;
+  const els = [...document.querySelectorAll('.scene')];
+  const bar = document.getElementById('bar');
+
+  function show(i) {
+    els.forEach((el, k) => el.classList.toggle('active', k === i));
+    if (i === 2) buildChart();
+    if (i === 4) runCounter();
+  }
+
+  // candlestick builder
+  let chartBuilt = false;
+  function buildChart() {
+    if (chartBuilt) return; chartBuilt = true;
+    const chart = document.getElementById('chart');
+    chart.innerHTML = '';
+    const data = [220,180,260,300,240,340,300,420,380,500,460,560];
+    data.forEach((h, i) => {
+      const up = i === 0 ? true : h >= data[i-1];
+      const c = document.createElement('div');
+      c.className = 'candle ' + (up ? 'up' : 'down');
+      c.style.height = h + 'px';
+      c.style.animationDelay = (i * 70) + 'ms';
+      const wick = document.createElement('div');
+      wick.className = 'wick';
+      wick.style.height = (h + 60) + 'px';
+      wick.style.top = '-30px';
+      c.appendChild(wick);
+      chart.appendChild(c);
+    });
+  }
+
+  // counter animation
+  let counterRun = false;
+  function runCounter() {
+    if (counterRun) return; counterRun = true;
+    const el = document.getElementById('counter');
+    const target = 10000, start = performance.now(), dur = 2200;
+    (function tick(now) {
+      const p = Math.min(1, (now - start) / dur);
+      const eased = 1 - Math.pow(1 - p, 3);
+      el.textContent = Math.floor(eased * target).toLocaleString();
+      if (p < 1) requestAnimationFrame(tick);
+    })(start);
+  }
+
+  function loop() {
+    const start = performance.now();
+    function frame(now) {
+      const t = now - start;
+      // progress bar
+      bar.style.width = Math.min(100, (t / TOTAL) * 100) + '%';
+      // active scene
+      let idx = 0;
+      for (let k = 0; k < scenes.length; k++) {
+        if (t >= scenes[k].at) idx = k;
+      }
+      if (window.__cur !== idx) { window.__cur = idx; show(idx); }
+      if (t < TOTAL) requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('load', () => { show(0); window.__cur = 0; loop(); });
+</script>
