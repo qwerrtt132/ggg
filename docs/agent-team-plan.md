@@ -1,6 +1,6 @@
 # Agent team: implementation plan
 
-Status: phases 1 and 2 done. Phase 3 done except the browser checks for the new run features, which are listed as open below. 72 tests pass. Owner: the repo's maintainer.
+Status: phases 1, 2, and 3 done. 73 tests pass, including browser tests. Owner: the repo's maintainer.
 
 Phase 3 as built:
 - Resumable runs: histories and counters are saved after each turn. A message after a restart rebuilds the team from the saved config and state.
@@ -12,8 +12,10 @@ Phase 3 as built:
 
 Not built, on purpose: running agent-written code (see "Deliberately not built").
 
+Checked in the browser: a run started on one server is continued from the page of a restarted server.
+
 Open:
-- Browser checks for a restarted run being continued from the page, and for the live preview. The server-level tests cover both, but not the page.
+- The live preview on agent cards is checked by the server test that streams live text, not in the browser.
 - The live preview is best-effort. Throttled to about 7 updates per second per agent.
 
 ## Phase 3: capability and durability

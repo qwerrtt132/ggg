@@ -9,6 +9,7 @@ import os
 import tempfile
 import threading
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -129,6 +130,62 @@ class UiTests(unittest.TestCase):
         page.select_option("#preset-select", "my stub team")
         page.click("#preset-load")
         expect(page.locator("#members .member")).to_have_count(2)
+        self.assertEqual(self.errors, [])
+
+    def test_a_run_continues_from_the_page_after_a_restart(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        data, master = root / "data", root / "master.key"
+
+        first_store = Store(data / "agent_team.db")
+        self.addCleanup(first_store.db.close)
+        first = Server(0, App(first_store, KeyVault(data, master_key_path=master), self.TOKEN))
+        threading.Thread(target=first.serve_forever, daemon=True).start()
+        self.addCleanup(first.server_close)
+        self.addCleanup(first.shutdown)
+        first_base = f"http://127.0.0.1:{first.server_port}"
+
+        def call(method, path, body=None):
+            request = urllib.request.Request(
+                first_base + path,
+                data=json.dumps(body).encode() if body is not None else None,
+                method=method,
+                headers={"X-Session-Token": self.TOKEN, "Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.read().decode()
+
+        config = {
+            "providers": {"stub": {"type": "openai_compatible", "base_url": self.stub_base}},
+            "lead": {"name": "lead", "provider": "stub", "model": "m", "role": "answer the user"},
+            "teammates": [],
+        }
+        call("POST", "/api/keys", {"provider": "stub", "key": "sk-restart-ui-1", "persist": True})
+        run_id = json.loads(call("POST", "/api/runs", {"config": config, "goal": "restart goal"}))["id"]
+        call("GET", f"/api/runs/{run_id}/events")  # returns once the run has finished
+
+        # The restarted server: same data directory, nothing held in memory.
+        second_store = Store(data / "agent_team.db")
+        self.addCleanup(second_store.db.close)
+        second_store.mark_interrupted()
+        second = Server(0, App(second_store, KeyVault(data, master_key_path=master), self.TOKEN))
+        threading.Thread(target=second.serve_forever, daemon=True).start()
+        self.addCleanup(second.server_close)
+        self.addCleanup(second.shutdown)
+
+        context = self.browser.new_context()
+        self.addCleanup(context.close)
+        page = context.new_page()
+        self.errors = []
+        page.on("pageerror", lambda error: self.errors.append(str(error)))
+        page.goto(f"http://127.0.0.1:{second.server_port}/?token={self.TOKEN}")
+        page.click("#run-list button:has-text('restart goal')")
+        expect(page.locator("#run-status")).to_contain_text("Status: done")
+
+        page.fill("#human-text", "after the restart")
+        page.click("#human-form button[type=submit]")
+        expect(page.locator("#feed")).to_contain_text("after the restart")
+        expect(page.locator("#feed .text", has_text="hello from stub")).to_have_count(2)
         self.assertEqual(self.errors, [])
 
     def test_missing_key_blocks_start_with_a_clear_message(self):
