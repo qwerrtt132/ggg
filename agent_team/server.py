@@ -19,7 +19,8 @@ from .providers import ProviderError
 from .runner import ConfigError, build_team, check_provider, default_config, redact, refuse_secret_fields, run_in_background
 from .store import FINISHED, Store
 from .templates import TEMPLATES
-from .tools import build_tools, copy_workspace
+from .review import WorkspaceReview
+from .tools import ToolError, build_tools, copy_workspace
 from .transcript import to_json, to_markdown
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -51,10 +52,13 @@ class RunControl:
 
 
 class App:
-    def __init__(self, store, vault, token, max_active_runs=MAX_ACTIVE_RUNS, workspaces=None):
+    def __init__(self, store, vault, token, max_active_runs=MAX_ACTIVE_RUNS, workspaces=None, baselines=None):
         self.store = store
         self.vault = vault
         self.token = token
+        if baselines is None and workspaces is not None:
+            baselines = Path(workspaces).parent / "accepted"
+        self.baselines = baselines  # one accepted-state folder per run, for reviewing changes
         self.max_active_runs = max_active_runs
         self.workspaces = workspaces  # folder holding one workspace per run, for the files tools
         self.runs = {}  # run id -> RunControl, for runs started by this process; finished ones are released
@@ -107,7 +111,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authorized(query):
                 return self._send_json(401, {"error": "missing or wrong session token"})
             self._api(method, parts[1:], query)
-        except (ConfigError, ProviderError, KeyVaultError, ValueError, KeyError, TypeError) as error:
+        except (ConfigError, ProviderError, KeyVaultError, ToolError, ValueError, KeyError, TypeError) as error:
             self._send_json(400, {"error": str(error)})
 
     def _api(self, method, parts, query):
@@ -141,10 +145,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, {"runs": app.store.list_runs()})
         if method == "POST" and parts == ["runs"]:
             return self._start_run()
+        if len(parts) == 4 and parts[0] == "runs" and parts[2] == "approvals" and method == "POST":
+            return self._approval(parts[1], parts[3])
         if len(parts) == 3 and parts[0] == "runs":
             run_id = parts[1]
             if app.store.get_run(run_id) is None:
                 return self._send_json(404, {"error": "unknown run"})
+            if parts[2] == "changes" and method == "GET":
+                return self._send_json(200, {"changes": self._review_for(run_id).changes() if app.workspaces else []})
+            if parts[2] == "changes" and method == "POST":
+                return self._review_change(run_id)
+            if parts[2] == "workspace.zip" and method == "GET":
+                return self._send(
+                    200,
+                    self._review_for(run_id).accepted_archive(),
+                    "application/zip",
+                    {"Content-Disposition": f'attachment; filename="run-{run_id[:8]}-accepted.zip"'},
+                )
             if method == "GET" and parts[2] == "events":
                 return self._stream(run_id, query)
             if method == "GET" and parts[2] == "export":
@@ -160,6 +177,48 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and parts[2] == "branch":
                 return self._branch(run_id)
         self._send_json(404, {"error": "not found"})
+
+    def _review_for(self, run_id):
+        app = self.server.app
+        if not app.workspaces or not app.baselines:
+            raise ValueError("this server has no workspaces, so there is nothing to review")
+        review = WorkspaceReview(app.workspaces / run_id, app.baselines / run_id)
+        review.ensure_baseline()
+        return review
+
+    def _review_change(self, run_id):
+        """Accept or reject one changed file. Refused while the run is working, so a write cannot race a review."""
+        app = self.server.app
+        body = self._body()
+        action, path = body.get("action"), str(body.get("path", ""))
+        if action not in ("accept", "reject") or not path:
+            raise ValueError("say which file, and whether to accept or reject it")
+        control = app.runs.get(run_id)
+        if control is not None and control.thread.is_alive():
+            return self._send_json(409, {"error": "wait for the run to finish or stop it before reviewing its files"})
+        review = self._review_for(run_id)
+        if action == "accept":
+            review.accept(path)
+        else:
+            review.reject(path)
+        self._send_json(200, {"changes": review.changes()})
+
+    def _approval(self, run_id, call_id):
+        """The page's answer to a tool call that is waiting: approve (optionally with changed arguments), or reject."""
+        app = self.server.app
+        body = self._body()
+        action = body.get("action")
+        if action not in ("approve", "reject"):
+            raise ValueError("the action is approve or reject")
+        decision = {"action": action, "reason": str(body.get("reason", ""))[:MAX_TEXT]}
+        if isinstance(body.get("arguments"), dict):
+            decision["arguments"] = body["arguments"]
+        control = app.runs.get(run_id)
+        if control is None or not control.thread.is_alive():
+            return self._send_json(409, {"error": "this run is not running, so nothing is waiting for approval"})
+        if not control.team.decide_approval(call_id, decision):
+            return self._send_json(404, {"error": "no approval is waiting with that id"})
+        self._send_json(202, {"ok": True})
 
     def _rewind(self, run_id):
         """Put a run back at an earlier turn, then continue it with a message. Later turns are dropped from the
@@ -213,7 +272,11 @@ class Handler(BaseHTTPRequestHandler):
             control = RunControl()
             team, secrets = _build_for_run(app, new_id, record["config"], control)
             if app.workspaces:
+                # The branch starts from the parent's files and its accepted state. The parent's unreviewed
+                # changes show up as pending in the branch, to review there.
                 copy_workspace(app.workspaces / run_id, app.workspaces / new_id)
+                parent_review = self._review_for(run_id)
+                copy_workspace(parent_review.baseline, app.baselines / new_id)
             app.store.create_run(new_id, record["goal"], record["config"], parent_id=run_id, parent_turn=turn)
             app.store.save_state(new_id, snapshot)
             team.restore(snapshot)
@@ -242,6 +305,8 @@ class Handler(BaseHTTPRequestHandler):
             control = RunControl()
             team, secret_values = _build_for_run(app, run_id, body.get("config"), control)
             app.store.create_run(run_id, goal, body.get("config"))
+            if app.workspaces:
+                self._review_for(run_id)  # a new run starts with nothing accepted yet
             control.team, control.secrets = team, secret_values
             control.thread = run_in_background(app.store, run_id, team, lambda: team.run(goal), secret_values)
             app.runs[run_id] = control
@@ -478,7 +543,7 @@ def serve(port=8765, data_dir="data"):
     store = Store(data / "agent_team.db")
     store.mark_interrupted()
     token = secrets.token_urlsafe(24)
-    server = Server(port, App(store, KeyVault(data), token, workspaces=data / "workspaces"))
+    server = Server(port, App(store, KeyVault(data), token, workspaces=data / "workspaces", baselines=data / "accepted"))
     print(f"Agent team is running. Open http://127.0.0.1:{server.server_port}/?token={token}")
     try:
         server.serve_forever()

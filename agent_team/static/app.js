@@ -3,7 +3,7 @@ const token = new URLSearchParams(location.search).get("token") || "";
 history.replaceState(null, "", "/");
 
 const FINISHED = new Set(["done", "idle", "max_turns", "timeout", "token_budget", "stalled", "stopped", "failed", "interrupted", "no_progress"]);
-const EVENT_KINDS = ["roster", "agent", "message", "turn", "human", "final", "error", "status", "rewind", "branched"];
+const EVENT_KINDS = ["roster", "agent", "message", "turn", "human", "final", "error", "status", "rewind", "branched", "approval", "approval_result"];
 const NAME_RULE = /^[a-z][a-z0-9_-]{0,31}$/;
 const DRAFT_KEY = "agent-team-draft";
 const TOOL_GROUPS = [
@@ -232,12 +232,23 @@ function memberRow(member, title, index) {
       if (box.checked) chosen.add(group);
       else chosen.delete(group);
       member.tools = [...chosen];
+      if (!member.tools.includes("files")) member.approve = [];
       changed();
     });
     const option = el("label", undefined, "inline");
     option.append(box, document.createTextNode(` ${description}`));
     tools.append(option);
   }
+  const askFirst = document.createElement("input");
+  askFirst.type = "checkbox";
+  askFirst.checked = (member.approve || []).includes("write_file");
+  askFirst.addEventListener("change", () => {
+    member.approve = askFirst.checked ? ["write_file"] : [];
+    changed();
+  });
+  const askLabel = el("label", undefined, "inline");
+  askLabel.append(askFirst, document.createTextNode(" Ask me before a file is written"));
+  tools.append(askLabel);
   row.append(tools);
   return row;
 }
@@ -338,11 +349,13 @@ function openRun(id, goal, status) {
   state.connection = "connecting";
   state.tokensUsed = 0;
   if (!sameRun) {
-    // A different run: forget the selected turn. Reopening the same run (after a rewind, say) keeps it.
+    // A different run: forget the selected turn and any approvals from the last run.
     state.selectedTurn = null;
     state.rewindArmed = false;
     $("time-actions").hidden = true;
     $("timeline").replaceChildren();
+    pendingApprovals.clear();
+    renderApprovals();
   }
   scheduleTimeline();
   $("run-title").textContent = goal;
@@ -401,7 +414,102 @@ let timelineTimer = null;
 
 function scheduleTimeline() {
   clearTimeout(timelineTimer);
-  timelineTimer = setTimeout(() => attempt(loadTimeline), 300);
+  timelineTimer = setTimeout(() => attempt(async () => {
+    await loadTimeline();
+    await loadChanges();
+  }), 300);
+}
+
+// ---------- approvals and file review ----------
+
+const pendingApprovals = new Map();
+
+function renderApprovals() {
+  const box = $("approvals");
+  box.replaceChildren();
+  for (const approval of pendingApprovals.values()) {
+    const card = el("div", undefined, "approval");
+    card.append(el("div", `${approval.agent} wants to run ${approval.tool}`, "who"));
+    const shown = el("pre", JSON.stringify(approval.arguments, null, 2), "args");
+    card.append(shown);
+
+    const decide = (body) => attempt(async () => {
+      await api("POST", `/runs/${state.runId}/approvals/${encodeURIComponent(approval.id)}`, body);
+      pendingApprovals.delete(approval.id);
+      renderApprovals();
+    });
+
+    const actions = el("div", undefined, "inline-form");
+    const approve = el("button", "Approve", "approve");
+    approve.addEventListener("click", () => decide({ action: "approve" }));
+
+    const edit = el("button", "Edit, then approve", "secondary edit");
+    const editor = document.createElement("textarea");
+    editor.className = "mono";
+    editor.rows = 6;
+    editor.value = JSON.stringify(approval.arguments, null, 2);
+    editor.hidden = true;
+    const editApprove = el("button", "Approve with these changes", "approve edited");
+    editApprove.hidden = true;
+    editApprove.addEventListener("click", () => {
+      let arguments_;
+      try {
+        arguments_ = JSON.parse(editor.value);
+      } catch (error) {
+        showNotice(`The changed arguments are not valid JSON: ${error.message}`);
+        return;
+      }
+      decide({ action: "approve", arguments: arguments_ });
+    });
+    edit.addEventListener("click", () => {
+      editor.hidden = false;
+      editApprove.hidden = false;
+      editor.focus();
+    });
+
+    const reason = document.createElement("input");
+    reason.className = "reason";
+    reason.placeholder = "Why not? (sent to the agent)";
+    const reject = el("button", "Reject", "secondary reject");
+    reject.addEventListener("click", () => decide({ action: "reject", reason: reason.value.trim() }));
+
+    actions.append(approve, edit, reject);
+    card.append(actions, editor, editApprove, reason);
+    box.append(card);
+  }
+  $("approvals-section").hidden = pendingApprovals.size === 0;
+}
+
+async function loadChanges() {
+  if (!state.runId) return;
+  const runId = state.runId;
+  const { changes } = await api("GET", `/runs/${runId}/changes`);
+  if (state.runId !== runId) return;
+  $("export-accepted").href = `/api/runs/${runId}/workspace.zip?token=${encodeURIComponent(token)}`;
+  const list = $("changes");
+  list.replaceChildren();
+  if (changes.length === 0) {
+    list.append(el("li", "Nothing waiting for review.", "muted"));
+    return;
+  }
+  for (const change of changes) {
+    const item = el("li", undefined, "change");
+    item.append(el("strong", change.path), el("span", ` ${change.status}`, "muted"));
+    if (change.diff) item.append(el("pre", change.diff, "diff"));
+    else item.append(el("p", "This file cannot be shown as text. Accept or reject it by name.", "muted"));
+    const decide = (action) => attempt(async () => {
+      await api("POST", `/runs/${runId}/changes`, { path: change.path, action });
+      await loadChanges();
+    });
+    const accept = el("button", "Accept", "accept");
+    accept.disabled = !state.finished;
+    accept.addEventListener("click", () => decide("accept"));
+    const reject = el("button", "Reject", "secondary reject");
+    reject.disabled = !state.finished;
+    reject.addEventListener("click", () => decide("reject"));
+    item.append(accept, reject);
+    list.append(item);
+  }
 }
 
 async function loadTimeline() {
@@ -476,6 +584,15 @@ function render(kind, data) {
   if (kind === "roster") return renderRoster(data);
   if (kind === "agent") return updateAgent(data);
   if (kind === "status") return finishRun(data.status);
+  if (kind === "approval") {
+    pendingApprovals.set(data.id, data);
+    return renderApprovals();
+  }
+  if (kind === "approval_result") {
+    pendingApprovals.delete(data.id);
+    renderApprovals();
+    return scheduleTimeline();
+  }
   if (kind === "turn") {
     scheduleTimeline();
     return updateTurn(data);
@@ -509,6 +626,10 @@ function finishRun(status) {
   updateControls();
   attempt(loadRuns);
   scheduleTimeline();
+  if (state.finished) {
+    pendingApprovals.clear();
+    renderApprovals();
+  }
 }
 
 function renderRoster(roster) {
@@ -655,6 +776,7 @@ $("template-select").addEventListener("change", (event) => {
     provider: Object.keys(state.team.providers)[0],
     model: state.team.lead.model,
     tools: template.tools,
+    approve: template.approve || [],
   });
   renderTeam();
 });

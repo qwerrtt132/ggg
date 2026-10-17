@@ -2,6 +2,7 @@ import itertools
 import json
 import os
 import queue
+import tempfile
 import threading
 import time
 import unittest
@@ -15,6 +16,8 @@ from agent_team.providers import (
     ToolCall,
     build_provider,
 )
+from pathlib import Path
+
 from agent_team.team import Agent, Team, context_view
 
 _call_ids = itertools.count(1)
@@ -377,6 +380,90 @@ class TeamTests(unittest.TestCase):
             Team([Agent("a", "r", provider, "m")], lead="b")
         with self.assertRaises(ValueError):
             Team([Agent("a", "r", provider, "m")], lead="a", verifier="a")
+
+
+def wait_for_event(events, kind, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for name, data in list(events):
+            if name == kind:
+                return data
+        time.sleep(0.02)
+    raise AssertionError(f"no {kind} event within {timeout} seconds")
+
+
+class ApprovalTests(unittest.TestCase):
+    def team(self, writer_replies, events, stop=None):
+        from agent_team.tools import build_tools
+
+        self.workspace = tempfile.mkdtemp()
+        self.lead = ScriptedProvider(reply(call("send_message", to="writer", message="write it")), reply(call("finish", answer="ok")))
+        self.writer = ScriptedProvider(*writer_replies)
+        return Team(
+            [
+                Agent("lead", "plans", self.lead, "m"),
+                Agent("writer", "writes", self.writer, "m", tools=["write_file"], approve=["write_file"]),
+            ],
+            lead="lead",
+            extra_tools=build_tools(self.workspace),
+            emit=lambda kind, **data: events.append((kind, data)),
+            stop_event=stop,
+        )
+
+    def start(self, team):
+        result = {}
+        worker = threading.Thread(target=lambda: result.update(answer=team.run("goal")))
+        worker.start()
+        self.addCleanup(worker.join, 5)
+        return result, worker
+
+    def test_a_write_waits_for_approval_and_uses_the_edited_arguments(self):
+        events = []
+        team = self.team([reply(call("write_file", path="note.md", content="draft")), reply(call("send_message", to="lead", message="done"))], events)
+        result, worker = self.start(team)
+
+        approval = wait_for_event(events, "approval")
+        self.assertEqual((approval["agent"], approval["tool"]), ("writer", "write_file"))
+        self.assertFalse((Path(self.workspace) / "note.md").exists())
+        self.assertTrue(team.decide_approval(approval["id"], {"action": "approve", "arguments": {"path": "note.md", "content": "edited"}}))
+        worker.join(5)
+
+        self.assertEqual(result["answer"], "ok")
+        self.assertEqual((Path(self.workspace) / "note.md").read_text(), "edited")
+
+    def test_a_rejected_write_is_not_run_and_the_model_hears_why(self):
+        events = []
+        team = self.team([reply(call("write_file", path="note.md", content="draft")), reply(call("send_message", to="lead", message="ok"))], events)
+        result, worker = self.start(team)
+
+        team.decide_approval(wait_for_event(events, "approval")["id"], {"action": "reject", "reason": "not this file"})
+        worker.join(5)
+
+        self.assertFalse((Path(self.workspace) / "note.md").exists())
+        rejected = [item for item in self.writer.calls[1] if item["role"] == "tool"][0]
+        self.assertTrue(rejected["is_error"])
+        self.assertIn("not this file", rejected["content"])
+
+    def test_stopping_while_waiting_keeps_the_history_valid(self):
+        events = []
+        stop = threading.Event()
+        team = self.team([reply(call("write_file", path="note.md", content="draft"))], events, stop=stop)
+        result, worker = self.start(team)
+
+        wait_for_event(events, "approval")
+        stop.set()
+        worker.join(5)
+
+        self.assertEqual(team.status, "stopped")
+        self.assertFalse((Path(self.workspace) / "note.md").exists())
+        last = team.agents["writer"].history[-1]
+        self.assertEqual(last["role"], "tool")
+        self.assertTrue(last["is_error"])
+        self.assertIn("stopped", last["content"])
+
+    def test_a_decision_for_an_unknown_call_is_refused(self):
+        team = self.team([reply(text="nothing")], [])
+        self.assertFalse(team.decide_approval("no-such-call", {"action": "approve"}))
 
 
 class _Handler(BaseHTTPRequestHandler):

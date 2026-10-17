@@ -64,6 +64,13 @@ def _member_tools(spec, registry):
     return [tool for group in groups for tool in GROUPS[group]]
 
 
+def _member_approvals(spec, tool_names):
+    approve = spec.get("approve", [])
+    if not isinstance(approve, list) or any(tool not in tool_names for tool in approve):
+        raise ConfigError(f"{spec['name']!r} can only require approval for its own tools: {sorted(tool_names)}")
+    return approve
+
+
 def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None, save_state=None, tools=None, on_live=None):
     """Returns (team, secrets). lookup_key(provider) gives a key from the vault, or None to fall back to the env var."""
     if not isinstance(config, dict):
@@ -102,6 +109,7 @@ def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None, save
             provider=providers[spec["provider"]],
             model=spec["model"],
             tools=_member_tools(spec, tools),
+            approve=_member_approvals(spec, _member_tools(spec, tools)),
         )
         for spec in specs
     ]

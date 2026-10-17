@@ -12,6 +12,7 @@ TEMPLATES = [
         "name": "Writer",
         "role": "Draft the content the task asks for, clearly and concisely. Keep drafts in the workspace.",
         "tools": ["files"],
+        "approve": ["write_file"],
     },
     {
         "id": "critic",
@@ -30,6 +31,7 @@ TEMPLATES = [
         "name": "Coder",
         "role": "Write the code the task needs as files in the workspace, and explain what each file does.",
         "tools": ["files"],
+        "approve": ["write_file"],
     },
 ]
 

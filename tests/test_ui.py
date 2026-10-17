@@ -44,7 +44,7 @@ class UiTests(unittest.TestCase):
         cls.stub = start_http_server(("127.0.0.1", 0), StubProvider)
         cls.stub_base = f"http://127.0.0.1:{cls.stub.server_port}"
         cls.store = Store(root / "data" / "agent_team.db")
-        app = App(cls.store, KeyVault(root / "data", master_key_path=root / "master.key"), cls.TOKEN)
+        app = App(cls.store, KeyVault(root / "data", master_key_path=root / "master.key"), cls.TOKEN, workspaces=root / "workspaces")
         cls.server = Server(0, app)
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
         cls.base = f"http://127.0.0.1:{cls.server.server_port}"
@@ -65,8 +65,8 @@ class UiTests(unittest.TestCase):
         cls.store.db.close()
         cls.directory.cleanup()
 
-    def open_page(self, provider="stub"):
-        team = {
+    def open_page(self, provider="stub", team=None):
+        team = team or {
             "providers": {provider: {"type": "openai_compatible", "base_url": self.stub_base}},
             "lead": {"name": "lead", "provider": provider, "model": "m", "role": "answer the user"},
             "teammates": [],
@@ -104,7 +104,7 @@ class UiTests(unittest.TestCase):
         expect(page.locator("#feed")).to_contain_text("and once more")
         expect(page.locator("#feed .text", has_text="hello from stub")).to_have_count(2)
 
-        page.click("#key-list li:first-child button:text('Test')")
+        page.click("#key-list li:has(strong:text-is('stub')) button:text('Test')")
         expect(page.locator("#notice")).to_contain_text("works with m")
 
         self.assertNotIn("sk-ui-1234", page.content())
@@ -118,6 +118,7 @@ class UiTests(unittest.TestCase):
         expect(page.locator("#members .member")).to_have_count(2)
         self.assertIn("Draft the content", page.locator("#members .member").nth(1).locator("textarea").input_value())
         self.assertTrue(page.locator("#members .member").nth(1).locator("input[type=checkbox]").first.is_checked())
+        self.assertTrue(page.locator("#members .member").nth(1).locator("input[type=checkbox]").last.is_checked())
 
         page.evaluate("document.querySelector('details:has(#preset-select)').open = true")
         page.fill("#preset-name", "my stub team")
@@ -214,6 +215,35 @@ class UiTests(unittest.TestCase):
         page.click("#branch")
         expect(page.locator("#time-note")).to_contain_text("Started a branch")
         expect(page.locator("#feed")).to_contain_text("Branched from another run at turn 1")
+        self.assertEqual(self.errors, [])
+
+    def test_an_approval_and_a_file_review_work_from_the_page(self):
+        from test_app import FileStub
+
+        file_server = start_http_server(("127.0.0.1", 0), FileStub)
+        self.addCleanup(file_server.server_close)
+        self.addCleanup(file_server.shutdown)
+        base = f"http://127.0.0.1:{file_server.server_port}"
+        team = {
+            "providers": {"fstub": {"type": "openai_compatible", "base_url": base}},
+            "lead": {"name": "lead", "provider": "fstub", "model": "m", "role": "plan the work"},
+            "teammates": [{"name": "writer", "provider": "fstub", "model": "m", "role": "write notes", "tools": ["files"], "approve": ["write_file"]}],
+        }
+        page = self.open_page(team=team)
+        page.click("#keys-details summary")
+        page.fill("#key-provider", "fstub")
+        page.fill("#key-value", "sk-ui-review-5555")
+        page.click("#keys-details button[type=submit]")
+        expect(page.locator("#notice")).to_have_text("Key saved.")
+
+        page.fill("#goal", "write a note")
+        page.click("#start")
+        expect(page.locator("#approvals .approval")).to_contain_text("write_file")
+        page.click("#approvals button.approve")
+        expect(page.locator("#run-status")).to_contain_text("Status: done")
+        expect(page.locator("#changes .change")).to_contain_text("note.md")
+        page.click("#changes button.accept")
+        expect(page.locator("#changes")).to_contain_text("Nothing waiting for review")
         self.assertEqual(self.errors, [])
 
     def test_missing_key_blocks_start_with_a_clear_message(self):

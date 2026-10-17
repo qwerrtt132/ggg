@@ -63,6 +63,10 @@ Each member has a name, a role, a provider, a model, and optional `tools`:
 
 A run's workspace lives in `data/workspaces/<run id>/`.
 
+Approvals: a member's `approve` list names the tools whose calls wait for you. The page shows the call with its arguments. You can approve it, edit the arguments and approve, or reject it with a reason, which the agent receives. Stopping the run or reaching the time limit ends a wait without running the call.
+
+Review: changes to a workspace are listed per file, with a diff for text. Accept a file to keep it, or reject it to restore the accepted version. Nothing is final until you accept it. "Download accepted files" gives a zip of accepted content only. Review is available once the run has finished or been stopped.
+
 Running code is not available. Model-written code would run on your machine, so it needs a container or similar isolation first.
 
 ### How a team works

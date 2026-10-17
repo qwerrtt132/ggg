@@ -5,6 +5,8 @@ import tempfile
 import threading
 import time
 import unittest
+import zipfile
+from io import BytesIO
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -174,6 +176,138 @@ class TwoAgentStub(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         pass
+
+
+class FileStub(BaseHTTPRequestHandler):
+    """The lead asks the writer for a note. The writer writes note.md, then reports. The lead finishes after that."""
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+        system, messages = body["messages"][0]["content"], body["messages"][1:]
+        if "You are 'lead'" in system:
+            name, arguments = ("send_message", {"to": "writer", "message": "write the note"}) if len(messages) <= 1 else ("finish", {"answer": "done"})
+        elif any(message["role"] == "tool" for message in messages):
+            name, arguments = "send_message", {"to": "lead", "message": "written"}
+        else:
+            name, arguments = "write_file", {"path": "note.md", "content": "draft text"}
+        call = {"index": 0, "id": "call_file", "function": {"name": name, "arguments": json.dumps(arguments)}}
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.end_headers()
+        for chunk in ({"choices": [{"delta": {"tool_calls": [call]}}]}, {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}):
+            self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+        self.wfile.write(b"data: [DONE]\n\n")
+
+    def log_message(self, *args):
+        pass
+
+
+class ReviewTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        env = mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"})
+        env.start()
+        self.addCleanup(env.stop)
+        stub = start_http_server(("127.0.0.1", 0), FileStub)
+        self.addCleanup(stub.server_close)
+        self.addCleanup(stub.shutdown)
+        self.stub_base = f"http://127.0.0.1:{stub.server_port}"
+        self.store = Store(self.root / "data" / "agent_team.db")
+        self.addCleanup(self.store.db.close)
+        vault = KeyVault(self.root / "data", master_key_path=self.root / "master.key")
+        vault.set("stub", "sk-review-4444")
+        self.workspaces = self.root / "workspaces"
+        self.accepted = self.root / "accepted"
+        self.server = Server(0, App(self.store, vault, "tok", workspaces=self.workspaces, baselines=self.accepted))
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+
+    def call(self, method, path, body=None):
+        request = urllib.request.Request(
+            self.base + path,
+            data=json.dumps(body).encode() if body is not None else None,
+            method=method,
+            headers={"X-Session-Token": "tok", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, error.read()
+
+    def start_run(self):
+        config = {
+            "providers": {"stub": {"type": "openai_compatible", "base_url": self.stub_base}},
+            "lead": {"name": "lead", "provider": "stub", "model": "m", "role": "plan"},
+            "teammates": [{"name": "writer", "provider": "stub", "model": "m", "role": "write", "tools": ["files"], "approve": ["write_file"]}],
+        }
+        status, body = self.call("POST", "/api/runs", {"config": config, "goal": "write a note"})
+        return json.loads(body)["id"]
+
+    def wait_for_approval(self, run_id):
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            for _, kind, data in self.store.events_after(run_id, 0):
+                if kind == "approval":
+                    return data
+            time.sleep(0.05)
+        raise AssertionError("no approval was requested")
+
+    def test_an_approved_write_is_reviewed_accepted_and_exported(self):
+        run_id = self.start_run()
+        approval = self.wait_for_approval(run_id)
+        self.assertEqual(approval["tool"], "write_file")
+        status, _ = self.call(
+            "POST",
+            f"/api/runs/{run_id}/approvals/{approval['id']}",
+            {"action": "approve", "arguments": {"path": "note.md", "content": "edited text"}},
+        )
+        self.assertEqual(status, 202)
+        _, events = self.call("GET", f"/api/runs/{run_id}/events")
+        self.assertIn("event: approval_result", events.decode())
+
+        _, changes = self.call("GET", f"/api/runs/{run_id}/changes")
+        pending = json.loads(changes)["changes"]
+        self.assertEqual([(change["path"], change["status"]) for change in pending], [("note.md", "added")])
+        self.assertIn("+edited text", pending[0]["diff"])
+
+        status, _ = self.call("POST", f"/api/runs/{run_id}/changes", {"path": "note.md", "action": "accept"})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(self.call("GET", f"/api/runs/{run_id}/changes")[1])["changes"], [])
+
+        _, archive = self.call("GET", f"/api/runs/{run_id}/workspace.zip")
+        with zipfile.ZipFile(BytesIO(archive)) as zipped:
+            self.assertEqual(zipped.read("note.md"), b"edited text")
+
+    def test_a_rejected_write_never_reaches_the_workspace(self):
+        run_id = self.start_run()
+        approval = self.wait_for_approval(run_id)
+        self.call("POST", f"/api/runs/{run_id}/approvals/{approval['id']}", {"action": "reject", "reason": "not now"})
+        _, events = self.call("GET", f"/api/runs/{run_id}/events")
+
+        self.assertFalse((self.workspaces / run_id / "note.md").exists())
+        self.assertIn("event: final", events.decode())
+        self.assertEqual(json.loads(self.call("GET", f"/api/runs/{run_id}/changes")[1])["changes"], [])
+
+    def test_a_decision_for_an_unknown_call_is_refused(self):
+        run_id = self.start_run()
+        approval = self.wait_for_approval(run_id)
+        status, _ = self.call("POST", f"/api/runs/{run_id}/approvals/no-such-call", {"action": "approve"})
+        self.assertEqual(status, 404)
+        self.call("POST", f"/api/runs/{run_id}/approvals/{approval['id']}", {"action": "reject"})
+        self.call("GET", f"/api/runs/{run_id}/events")  # the run can finish once its approval is answered
+
+    def test_reviewing_is_refused_while_the_run_is_working(self):
+        run_id = self.start_run()
+        approval = self.wait_for_approval(run_id)
+        status, _ = self.call("POST", f"/api/runs/{run_id}/changes", {"path": "note.md", "action": "accept"})
+        self.assertEqual(status, 409)
+        self.call("POST", f"/api/runs/{run_id}/approvals/{approval['id']}", {"action": "reject"})
+        self.call("GET", f"/api/runs/{run_id}/events")
 
 
 class CheckpointTests(unittest.TestCase):

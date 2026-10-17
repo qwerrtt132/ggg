@@ -114,6 +114,17 @@
         <span id="token-text" class="muted"></span>
       </div>
       <ul id="cards" class="cards" aria-label="Agents"></ul>
+      <section id="approvals-section" class="approvals-section" aria-labelledby="approvals-title" hidden>
+        <h3 id="approvals-title">Waiting for you</h3>
+        <div id="approvals"></div>
+      </section>
+      <section class="changes-section" aria-labelledby="changes-title">
+        <h3 id="changes-title">Changes to review</h3>
+        <ul id="changes" class="changes" aria-live="polite"></ul>
+        <p class="exports">
+          <a id="export-accepted" class="button-link secondary" download>Download accepted files</a>
+        </p>
+      </section>
       <section class="timeline-section" aria-labelledby="timeline-title">
         <h3 id="timeline-title">Turns</h3>
         <ol id="timeline" class="timeline" aria-label="Turns of this run"></ol>

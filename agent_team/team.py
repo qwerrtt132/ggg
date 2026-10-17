@@ -19,6 +19,26 @@ POLL_SECONDS = 0.05
 
 class _Deadline(Exception):
     """The time limit ended a model call before it returned."""
+
+
+class _Interrupt(Exception):
+    """A stop or the time limit ended the run while a tool call was waiting."""
+
+    def __init__(self, status):
+        super().__init__(status)
+        self.status = status
+
+
+class _Waiting:
+    """One approval waiting for a decision."""
+
+    def __init__(self):
+        self.event = threading.Event()
+        self.decision = None
+
+
+def _result(call, content, is_error):
+    return {"role": "tool", "tool_call_id": call.id, "content": content, "is_error": is_error}
 LIVE_INTERVAL_SECONDS = 0.15  # at most one live-text update per agent this often
 
 SEND_MESSAGE = {
@@ -64,6 +84,7 @@ class Agent:
     model: str
     history: list = field(default_factory=list)
     tools: list = field(default_factory=list)  # names of extra tools this member may use
+    approve: list = field(default_factory=list)  # tools whose calls wait for a person's decision
 
 
 def normalize(text):
@@ -151,6 +172,8 @@ class Team:
         self._last_live = {}
         self._call_id = 0  # identifies the current model call, so an abandoned call's late text is ignored
         self.turn_no = 0  # turns taken so far, across runs and continuations; checkpoints are keyed by it
+        self.pending_approvals = {}  # call id -> _Waiting
+        self._deadline = float("inf")
         self.last_agent = None
         self.status = None
         self.tokens_used = 0
@@ -199,6 +222,7 @@ class Team:
 
     def _loop(self):
         started = self.clock()
+        self._deadline = time.monotonic() + self.max_seconds  # approvals wait within the same time limit
         recent = deque(maxlen=STALL_REPEATS)
         turns = 0
         while True:
@@ -243,8 +267,10 @@ class Team:
             )
             agent.history.append({"role": "assistant", "text": reply.text, "tool_calls": reply.tool_calls})
 
-            results, decision, failed = self._handle_calls(name, reply.tool_calls)
+            results, decision, failed, interrupt = self._handle_calls(name, reply.tool_calls)
             agent.history.extend(results)
+            if interrupt is not None:
+                return self._finish(interrupt.status)
             self._checkpoint()
             if decision is not None:
                 return self._finish("done", decision)
@@ -365,27 +391,67 @@ class Team:
         return base + extra
 
     def _handle_calls(self, sender, calls):
-        """Run one turn's tool calls. Returns (tool result items, decision or None, whether any call failed)."""
+        """Run one turn's tool calls. Returns (tool result items, decision or None, whether any call failed,
+        the interrupt or None). Every call gets a result, even when the run is interrupted part way."""
         results, decision, failed = [], None, False
         allowed = {tool["name"] for tool in self._tools_for(sender)}
-        for call in calls:
-            if call.error:
-                content, is_error, outcome = f"The arguments were not valid JSON ({call.error}). Send the call again.", True, None
-            elif call.name not in allowed:
-                available = ", ".join(sorted(allowed))
-                content, is_error, outcome = f"The tool {call.name!r} is not available to you. Available: {available}.", True, None
-            else:
-                content, is_error, outcome = self._execute(sender, call)
+        for index, call in enumerate(calls):
+            try:
+                if call.error:
+                    content, is_error, outcome = f"The arguments were not valid JSON ({call.error}). Send the call again.", True, None
+                elif call.name not in allowed:
+                    available = ", ".join(sorted(allowed))
+                    content, is_error, outcome = f"The tool {call.name!r} is not available to you. Available: {available}.", True, None
+                else:
+                    content, is_error, outcome = self._execute(sender, call)
+            except _Interrupt as interrupt:
+                for skipped in calls[index:]:
+                    results.append(_result(skipped, f"The run {interrupt.status} before this call ran.", True))
+                return results, decision, True, interrupt
             if outcome is not None:
                 decision = outcome
             failed = failed or is_error
-            results.append({"role": "tool", "tool_call_id": call.id, "content": content, "is_error": is_error})
-        return results, decision, failed
+            results.append(_result(call, content, is_error))
+        return results, decision, failed, None
+
+    def _await_approval(self, sender, call):
+        """Wait for a person to approve, change, or reject a call. Stops early on a stop or the time limit."""
+        waiting = _Waiting()
+        self.pending_approvals[call.id] = waiting
+        self.emit("approval", id=call.id, agent=sender, tool=call.name, arguments=call.arguments)
+        decided = False
+        try:
+            while not waiting.event.wait(POLL_SECONDS):
+                if self.stop_event.is_set():
+                    raise _Interrupt("stopped")
+                if time.monotonic() >= self._deadline:
+                    raise _Interrupt("timeout")
+            decided = True
+        finally:
+            self.pending_approvals.pop(call.id, None)
+            self.emit("approval_result", id=call.id, action=waiting.decision["action"] if decided else "cancelled")
+        return waiting.decision
+
+    def decide_approval(self, call_id, decision):
+        """Called by the page through the server. Returns False if no approval is waiting with that id."""
+        waiting = self.pending_approvals.get(call_id)
+        if waiting is None or waiting.event.is_set():
+            return False
+        waiting.decision = decision
+        waiting.event.set()
+        return True
 
     def _execute(self, sender, call):
         """Returns (result text, is_error, final answer or None)."""
         args = call.arguments
         if call.name in self.extra_tools:
+            if call.name in self.agents[sender].approve:
+                decision = self._await_approval(sender, call)
+                if decision.get("action") != "approve":
+                    reason = str(decision.get("reason", "")).strip()
+                    return f"The user did not approve this call.{' Reason: ' + reason if reason else ''}", True, None
+                if isinstance(decision.get("arguments"), dict):
+                    args = decision["arguments"]
             content, is_error = self.extra_tools[call.name][1](args)
             return content, is_error, None
         if call.name == "send_message":
