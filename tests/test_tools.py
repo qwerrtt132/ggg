@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_team.providers import Reply, ToolCall
-from agent_team.runner import ConfigError, build_team
+from agent_team.runner import DEFAULT_MAX_TOKENS, ConfigError, build_team
 from agent_team.team import Agent, Team
 from agent_team.tools import ToolError, Workspace, build_tools, fetch, check_url
 
@@ -143,6 +143,21 @@ class TeamToolTests(unittest.TestCase):
         self.assertIn("hello from the writer", results[1]["content"])
 
 
+class ToolFailureTests(unittest.TestCase):
+    def test_os_and_encoding_errors_come_back_as_tool_errors(self):
+        tools = build_tools(tempfile.mkdtemp())
+        tools["write_file"][1]({"path": "sub/x.txt", "content": "x"})
+
+        for label, arguments in [
+            ("a folder path", {"path": "sub", "content": "x"}),
+            ("a lone surrogate", {"path": "bad.txt", "content": "bad \ud800 text"}),
+        ]:
+            with self.subTest(label):
+                text, is_error = tools["write_file"][1](arguments)
+                self.assertTrue(is_error)
+                self.assertTrue(text)
+
+
 class ConfigToolTests(unittest.TestCase):
     def config(self, tools):
         return {
@@ -158,6 +173,15 @@ class ConfigToolTests(unittest.TestCase):
     def test_tools_need_a_workspace(self):
         with self.assertRaisesRegex(ConfigError, "no workspace"):
             build_team(self.config(["files"]), lambda name: "key", emit=None, tools=None)
+
+    def test_a_config_without_a_token_budget_gets_the_default(self):
+        team, _ = build_team(self.config([]), lambda name: "key", emit=None)
+        self.assertEqual(team.max_tokens, DEFAULT_MAX_TOKENS)
+
+        config = self.config([])
+        config["max_tokens"] = None
+        unlimited, _ = build_team(config, lambda name: "key", emit=None)
+        self.assertIsNone(unlimited.max_tokens)
 
     def test_a_valid_tool_group_gives_the_member_its_tools(self):
         team, _ = build_team(self.config(["files"]), lambda name: "key", emit=None, tools=build_tools(tempfile.mkdtemp()))

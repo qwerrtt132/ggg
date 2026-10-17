@@ -3,6 +3,7 @@ import os
 import stat
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -122,6 +123,180 @@ class KeyVaultTests(unittest.TestCase):
 
         with self.assertRaisesRegex(KeyVaultError, "enter it again"):
             KeyVault(data, master_key_path=other).get("openai")
+
+
+def decode(raw):
+    """JSON for API replies, plain text for event streams."""
+    text = raw.decode()
+    try:
+        return json.loads(text or "{}")
+    except json.JSONDecodeError:
+        return text
+
+
+class ConcurrencyTests(unittest.TestCase):
+    """Each test holds a run open on a gate, so races between requests happen every time."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        env = mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"})
+        env.start()
+        self.addCleanup(env.stop)
+        stub = start_http_server(("127.0.0.1", 0), StubProvider)
+        self.addCleanup(stub.server_close)
+        self.addCleanup(stub.shutdown)
+        self.stub_base = f"http://127.0.0.1:{stub.server_port}"
+        self.store = Store(self.root / "data" / "agent_team.db")
+        self.addCleanup(self.store.db.close)
+        vault = KeyVault(self.root / "data", master_key_path=self.root / "master.key")
+        vault.set("stub", "sk-concurrency-1111")
+        self.server = Server(0, App(self.store, vault, "tok"))
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+        self.gate = threading.Event()
+        self.addCleanup(self.gate.set)
+
+    def config(self):
+        return {
+            "providers": {"stub": {"type": "openai_compatible", "base_url": self.stub_base}},
+            "lead": {"name": "lead", "provider": "stub", "model": "m", "role": "answer"},
+            "teammates": [],
+        }
+
+    def call(self, method, path, body=None):
+        request = urllib.request.Request(
+            self.base + path,
+            data=json.dumps(body).encode() if body is not None else None,
+            method=method,
+            headers={"X-Session-Token": "tok", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status, decode(response.read())
+        except urllib.error.HTTPError as error:
+            return error.code, decode(error.read())
+
+    def gated_runs(self):
+        """Runs stay alive until self.gate is set. Starting one takes 0.3 seconds, inside the server."""
+        from agent_team import server as server_module
+
+        real = server_module.run_in_background
+        gate = self.gate
+
+        def gated(store, run_id, team, action, secrets):
+            def held():
+                gate.wait(5)
+                return action()
+
+            thread = real(store, run_id, team, held, secrets)
+            time.sleep(0.3)
+            return thread
+
+        return mock.patch.object(server_module, "run_in_background", side_effect=gated)
+
+    def test_simultaneous_messages_to_a_finished_run_continue_once(self):
+        status, body = self.call("POST", "/api/runs", {"config": self.config(), "goal": "say hi"})
+        run_id = body["id"]
+        self.gate.set()
+        self.call("GET", f"/api/runs/{run_id}/events")
+        self.gate.clear()
+
+        results = []
+        with self.gated_runs():
+            threads = [
+                threading.Thread(target=lambda text=text: results.append(self.call("POST", f"/api/runs/{run_id}/message", {"text": text})[1]))
+                for text in ("first", "second")
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+        self.gate.set()
+        self.call("GET", f"/api/runs/{run_id}/events")
+
+        self.assertEqual(sorted(result["resumed"] for result in results), [False, True])
+        kinds = [kind for _, kind, _ in self.store.events_after(run_id, 0)]
+        self.assertEqual(kinds.count("final"), 2)
+
+    def test_simultaneous_starts_respect_the_run_cap(self):
+        self.server.app.max_active_runs = 1
+        results = []
+        with self.gated_runs():
+            threads = [
+                threading.Thread(target=lambda: results.append(self.call("POST", "/api/runs", {"config": self.config(), "goal": "g"})[0]))
+                for _ in range(3)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+
+        self.assertEqual(sorted(results), [201, 429, 429])
+
+    def test_finished_runs_are_released_from_memory(self):
+        self.gate.set()
+        _, first = self.call("POST", "/api/runs", {"config": self.config(), "goal": "first"})
+        self.call("GET", f"/api/runs/{first['id']}/events")
+        _, second = self.call("POST", "/api/runs", {"config": self.config(), "goal": "second"})
+
+        self.assertNotIn(first["id"], self.server.app.runs)
+        status, body = self.call("POST", f"/api/runs/{first['id']}/message", {"text": "again"})
+        self.assertEqual((status, body["resumed"]), (202, True))
+
+
+class LockTests(unittest.TestCase):
+    def test_a_second_server_on_the_same_data_directory_is_refused(self):
+        from agent_team.locks import acquire_data_lock
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        first = acquire_data_lock(Path(directory.name))
+        self.addCleanup(first.close)
+
+        with self.assertRaisesRegex(RuntimeError, "already in use"):
+            acquire_data_lock(Path(directory.name))
+
+
+class CliTests(unittest.TestCase):
+    def test_provider_errors_on_the_command_line_hide_the_key(self):
+        import contextlib
+        import io
+        from agent_team.__main__ import main
+
+        class Echo(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["content-length"]))
+                payload = json.dumps({"error": {"message": f"rejected {self.headers['authorization']}"}}).encode()
+                self.send_response(400)
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        server = start_http_server(("127.0.0.1", 0), Echo)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        config = Path(directory.name) / "team.json"
+        config.write_text(json.dumps({
+            "providers": {"p": {"type": "openai_compatible", "base_url": f"http://127.0.0.1:{server.server_port}", "api_key_env": "TEAM_CLI_KEY"}},
+            "lead": {"name": "lead", "provider": "p", "model": "m", "role": "answer"},
+            "teammates": [],
+        }))
+        errors = io.StringIO()
+        with mock.patch.dict(os.environ, {"TEAM_CLI_KEY": "sk-cli-secret-9999", "NO_PROXY": "127.0.0.1"}), contextlib.redirect_stderr(errors):
+            code = main(["run", str(config), "goal"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("[redacted]", errors.getvalue())
+        self.assertNotIn("sk-cli-secret-9999", errors.getvalue())
 
 
 class TranscriptTests(unittest.TestCase):

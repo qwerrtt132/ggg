@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .keys import KeyVault, KeyVaultError
+from .locks import acquire_data_lock
 from .providers import ProviderError
 from .runner import ConfigError, build_team, check_provider, default_config, redact, refuse_secret_fields, run_in_background
 from .store import FINISHED, Store
@@ -56,7 +57,16 @@ class App:
         self.token = token
         self.max_active_runs = max_active_runs
         self.workspaces = workspaces  # folder holding one workspace per run, for the files tools
-        self.runs = {}  # run id -> RunControl, for runs started by this process
+        self.runs = {}  # run id -> RunControl, for runs started by this process; finished ones are released
+        self.lock = threading.Lock()
+
+    def active_count(self):
+        return sum(1 for control in self.runs.values() if control.thread.is_alive())
+
+    def forget_finished(self):
+        """Drop finished runs from memory. Continuing one later rebuilds it from the database."""
+        for run_id in [run_id for run_id, control in self.runs.items() if not control.thread.is_alive()]:
+            del self.runs[run_id]
 
 
 class Server(ThreadingHTTPServer):
@@ -151,42 +161,48 @@ class Handler(BaseHTTPRequestHandler):
         goal = str(body.get("goal", "")).strip()
         if not goal or len(goal) > MAX_TEXT:
             raise ValueError(f"the goal must be 1 to {MAX_TEXT} characters")
-        active = sum(1 for control in app.runs.values() if control.thread.is_alive())
-        if active >= app.max_active_runs:
-            return self._send_json(
-                429, {"error": f"{active} runs are already running; wait for one to finish or stop one"}
-            )
-        run_id = uuid.uuid4().hex
-        control = RunControl()
-        team, secret_values = _build_for_run(app, run_id, body.get("config"), control)
-        app.store.create_run(run_id, goal, body.get("config"))
-        control.team, control.secrets = team, secret_values
-        control.thread = run_in_background(app.store, run_id, team, lambda: team.run(goal), secret_values)
-        app.runs[run_id] = control
+        with app.lock:  # the cap check and the registration must happen together
+            app.forget_finished()
+            active = app.active_count()
+            if active >= app.max_active_runs:
+                return self._send_json(
+                    429, {"error": f"{active} runs are already running; wait for one to finish or stop one"}
+                )
+            run_id = uuid.uuid4().hex
+            control = RunControl()
+            team, secret_values = _build_for_run(app, run_id, body.get("config"), control)
+            app.store.create_run(run_id, goal, body.get("config"))
+            control.team, control.secrets = team, secret_values
+            control.thread = run_in_background(app.store, run_id, team, lambda: team.run(goal), secret_values)
+            app.runs[run_id] = control
         self._send_json(201, {"id": run_id})
 
     def _human_message(self, run_id):
         app = self.server.app
-        control = app.runs.get(run_id)
         text = str(self._body().get("text", "")).strip()[:MAX_TEXT]
         if not text:
             raise ValueError("the message is empty")
-        if control is not None and control.thread.is_alive():
-            control.human.put(text)
+        # One lock decides whether this message queues on a live run or continues a finished one. Without it,
+        # two messages sent together could both continue the same run.
+        with app.lock:
+            app.forget_finished()
+            control = app.runs.get(run_id)
+            if control is not None and control.thread.is_alive():
+                control.human.put(text)
+                app.store.add_event(run_id, "human", {"text": text})
+                return self._send_json(202, {"resumed": False})
+            # The run has ended: continue it with the same agents and their histories.
+            if app.active_count() >= app.max_active_runs:
+                return self._send_json(429, {"error": "too many runs are running; wait for one to finish or stop one"})
+            if control is None:
+                control = self._restore_control(run_id)
+                app.runs[run_id] = control
+            app.store.resume_run(run_id)
             app.store.add_event(run_id, "human", {"text": text})
-            return self._send_json(202, {"resumed": False})
-        # The run has ended: continue it with the same agents and their histories.
-        if self._active_runs() >= app.max_active_runs:
-            return self._send_json(429, {"error": "too many runs are running; wait for one to finish or stop one"})
-        if control is None:
-            control = self._restore_control(run_id)
-            app.runs[run_id] = control
-        app.store.resume_run(run_id)
-        app.store.add_event(run_id, "human", {"text": text})
-        control.stop.clear()
-        control.thread = run_in_background(
-            app.store, run_id, control.team, lambda: control.team.continue_run(text), control.secrets
-        )
+            control.stop.clear()
+            control.thread = run_in_background(
+                app.store, run_id, control.team, lambda: control.team.continue_run(text), control.secrets
+            )
         self._send_json(202, {"resumed": True})
 
     def _restore_control(self, run_id):
@@ -239,9 +255,6 @@ class Handler(BaseHTTPRequestHandler):
         else:
             raise ValueError("format must be md or json")
         self._send(200, body, content_type, {"Content-Disposition": f'attachment; filename="run-{run_id[:8]}.{extension}"'})
-
-    def _active_runs(self):
-        return sum(1 for control in self.server.app.runs.values() if control.thread.is_alive())
 
     def _test_provider(self, name):
         app = self.server.app
@@ -375,6 +388,7 @@ def _env_keys():
 
 def serve(port=8765, data_dir="data"):
     data = Path(data_dir)
+    lock = acquire_data_lock(data)  # held until the process exits
     store = Store(data / "agent_team.db")
     store.mark_interrupted()
     token = secrets.token_urlsafe(24)

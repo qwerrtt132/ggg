@@ -11,6 +11,7 @@ from .team import Agent, Team
 from .tools import GROUPS
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "default_team.json"
+DEFAULT_MAX_TOKENS = 200_000  # used when a config has no token budget; null in a config means no budget
 NAME_RULE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
@@ -110,7 +111,7 @@ def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None, save
         verifier=config.get("verifier"),
         max_turns=config.get("max_turns", 30),
         max_seconds=config.get("max_seconds", 600),
-        max_tokens=config.get("max_tokens"),
+        max_tokens=config.get("max_tokens", DEFAULT_MAX_TOKENS),
         emit=emit,
         human_inbox=human_inbox,
         stop_event=stop_event,

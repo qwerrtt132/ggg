@@ -171,6 +171,10 @@ def build_tools(workspace_root, allow_private=False):
                 return action(arguments), False
             except ToolError as error:
                 return str(error), True
+            except OSError as error:
+                return f"could not do that: {error.strerror or error}", True
+            except UnicodeError as error:
+                return f"the text could not be written as UTF-8 ({error.reason})", True
 
         return handler
 

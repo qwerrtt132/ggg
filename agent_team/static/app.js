@@ -303,6 +303,7 @@ function renderReadiness() {
 function setLimit(key, value) {
   const number = parseInt(value, 10);
   if (Number.isFinite(number)) state.team[key] = number;
+  else if (key === "max_tokens") state.team[key] = null; // an empty budget means no budget, not the default
   else delete state.team[key];
   changed();
 }

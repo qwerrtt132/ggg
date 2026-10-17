@@ -75,6 +75,8 @@ Running code is not available. Model-written code would run on your machine, so 
 - Rate limits and server errors are retried with backoff (up to 4 attempts, honoring `Retry-After`).
 - Only the most recent 16 history items are sent to the model, so long runs cost less.
 - At most 3 runs execute at once. Stop takes effect immediately, even during a model call.
+- A config without `max_tokens` gets a budget of 200,000 tokens. Set `"max_tokens": null` to run with no budget. The time limit covers the whole run, including a call that is in progress.
+- A stream that fails before any output is retried. One that fails after output has started is not, so no tokens are billed twice. A stream that ends early is reported as an error, not as a short reply.
 - Limits stop runaway runs, and the run status says which one applied: `max_turns`, `max_seconds` (`timeout`), `max_tokens` (`token_budget`), a repeated turn (`stalled`), `no_progress`, `stopped`, `failed`, `idle` when no one has anything left to do, or `interrupted` after a restart.
 
 ### Tests
@@ -87,6 +89,7 @@ The tests use scripted replies and local stub servers, so they don't call any re
 
 ### Known limits
 
+- Only one server can use a data directory at a time. The lock is an OS file lock. It is not enforced on Windows, where you must run one server per data directory yourself.
 - Replies stream. The page shows the end of each agent's reply while it arrives. That live text is not saved, so after a reconnect it shows only what is streaming at that moment. The saved feed shows the full message once the turn ends.
 - The `openai_compatible` provider needs a server with tool calling. Chat-only servers fail. Streaming also asks for token usage with `stream_options`. A server that rejects that option will fail the request.
 - The fetch tool checks an address before connecting. A name whose address changes between the check and the connection could still reach a private address. Treat fetch as reading public pages, not as a hardened proxy.

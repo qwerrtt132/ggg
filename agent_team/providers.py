@@ -100,7 +100,12 @@ class Provider:
         except urllib.error.HTTPError as error:
             raise self._http_error(error) from None
         except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as error:
-            raise ProviderError(f"{self.name}: stream interrupted: {error}", retryable=True) from None
+            # Once output has started, a retry would send the request again and bill it again.
+            raise ProviderError(f"{self.name}: stream interrupted: {error}", retryable=not parser.started) from None
+        if not parser.done:
+            raise ProviderError(
+                f"{self.name}: stream ended before the reply was complete", retryable=not parser.started
+            )
         return parser.result()
 
     def _http_error(self, error):
@@ -181,8 +186,11 @@ class _AnthropicStream:
         self.stop_reason = None
         self.tokens_in = 0
         self.tokens_out = 0
+        self.started = False  # any event received
+        self.done = False  # the stream's own end marker received
 
     def feed(self, event, data):
+        self.started = True
         payload = json.loads(data)
         kind = payload.get("type", event)
         if kind == "message_start":
@@ -207,6 +215,8 @@ class _AnthropicStream:
         elif kind == "message_delta":
             self.stop_reason = payload["delta"].get("stop_reason")
             self.tokens_out = payload.get("usage", {}).get("output_tokens", 0)
+        elif kind == "message_stop":
+            self.done = True
         elif kind == "error":
             message = payload.get("error", {}).get("message", "unknown error")
             raise ProviderError(f"anthropic: stream error: {message}")
@@ -315,9 +325,13 @@ class _OpenAIStream:
         self.calls = {}
         self.finish_reason = None
         self.tokens = 0
+        self.started = False  # any event received
+        self.done = False  # a finish reason or the [DONE] marker received
 
     def feed(self, event, data):
+        self.started = True
         if data.strip() == "[DONE]":
+            self.done = True
             return
         payload = json.loads(data)
         if payload.get("usage"):
@@ -325,6 +339,7 @@ class _OpenAIStream:
         for choice in payload.get("choices", []):
             if choice.get("finish_reason"):
                 self.finish_reason = choice["finish_reason"]
+                self.done = True
             delta = choice.get("delta", {})
             if delta.get("content"):
                 self.text += delta["content"]

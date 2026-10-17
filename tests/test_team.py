@@ -3,6 +3,7 @@ import json
 import os
 import queue
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest import mock
@@ -246,6 +247,51 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(live[-1], ("lead", ""))
         self.assertTrue(set(text for _, text in live) <= {"", "part", "partial reply"})
 
+    def test_a_stop_then_a_late_update_adds_no_live_text(self):
+        release = threading.Event()
+
+        class Slow:
+            name = "slow"
+
+            def complete(self, model, system, messages, tools, on_text=None):
+                on_text("partial")
+                release.wait(5)
+                on_text("late text after stop")
+                return reply(call("finish", answer="x"))
+
+        live = []
+        stop = threading.Event()
+        team = Team([Agent("lead", "plans", Slow(), "m")], lead="lead", stop_event=stop, on_live=lambda name, text: live.append((name, text)))
+        worker = threading.Thread(target=team.run, args=("goal",))
+        worker.start()
+        time.sleep(0.3)
+        stop.set()
+        worker.join(3)
+        time.sleep(0.4)
+        release.set()
+        time.sleep(0.4)
+
+        self.assertEqual(team.status, "stopped")
+        self.assertEqual(live[-1], ("lead", ""))
+
+    def test_a_slow_call_ends_at_the_time_limit(self):
+        release = threading.Event()
+
+        class Slow:
+            name = "slow"
+
+            def complete(self, model, system, messages, tools, on_text=None):
+                release.wait(5)
+                return reply(call("finish", answer="late"))
+
+        team = Team([Agent("lead", "plans", Slow(), "m")], lead="lead", max_seconds=0.3)
+        self.addCleanup(release.set)
+
+        started = time.monotonic()
+        self.assertIsNone(team.run("goal"))
+        self.assertEqual(team.status, "timeout")
+        self.assertLess(time.monotonic() - started, 2)
+
     def test_human_message_reaches_the_lead_during_the_run(self):
         lead = ScriptedProvider(reply(call("finish", answer="done")))
         human = queue.Queue()
@@ -309,7 +355,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("content-type", "application/json")
         for name, value in headers.items():
             self.send_header(name, value)
-        self.send_header("content-length", str(len(raw)))
+        if "content-length" not in headers:
+            self.send_header("content-length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
 
@@ -559,6 +606,18 @@ class ProviderHttpTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ProviderError, "overloaded here"):
             provider.complete("m", "s", [{"role": "user", "text": "hi"}], [], on_text=lambda text: None)
+
+    def test_a_stream_cut_off_after_output_started_is_not_retried(self):
+        body = events((None, {"choices": [{"delta": {"content": "half a "}}]}))
+        # The declared length is longer than what is sent, so the connection ends early.
+        _Handler.responses = [respond(body, headers={"content-length": str(len(body) + 500)}), respond(body)]
+        provider = self.openai()
+        provider.sleep = self.sleeps.append
+
+        with self.assertRaisesRegex(ProviderError, "stream ended before the reply was complete"):
+            provider.complete("m", "s", [{"role": "user", "text": "hi"}], [], on_text=lambda text: None)
+        self.assertEqual(len(_Handler.seen), 1)
+        self.assertEqual(self.sleeps, [])
 
     def test_missing_key_is_a_clear_error(self):
         with self.assertRaisesRegex(ProviderError, "no API key configured"):

@@ -15,6 +15,10 @@ STALL_MIN_LENGTH = 80  # shorter turns are compared exactly, so "try 1" and "try
 SILENT_TURNS_LIMIT = 2  # turns without any tool call before the run gives up
 HISTORY_WINDOW = 16  # recent items sent to the model; older ones are dropped
 POLL_SECONDS = 0.05
+
+
+class _Deadline(Exception):
+    """The time limit ended a model call before it returned."""
 LIVE_INTERVAL_SECONDS = 0.15  # at most one live-text update per agent this often
 
 SEND_MESSAGE = {
@@ -145,6 +149,7 @@ class Team:
         self.extra_tools = extra_tools or {}  # name -> (definition, handler), see tools.build_tools
         self.on_live = on_live  # called with (agent, text so far) while a reply streams, and (agent, "") when it ends
         self._last_live = {}
+        self._call_id = 0  # identifies the current model call, so an abandoned call's late text is ignored
         self.status = None
         self.tokens_used = 0
         self.goal = ""
@@ -191,7 +196,8 @@ class Team:
             self._drain_human()
             if self.stop_event.is_set():
                 return self._finish("stopped")
-            if self.clock() - started > self.max_seconds:
+            elapsed = self.clock() - started
+            if elapsed > self.max_seconds:
                 return self._finish("timeout")
             if self.max_tokens is not None and self.tokens_used >= self.max_tokens:
                 return self._finish("token_budget")
@@ -205,10 +211,14 @@ class Team:
             agent.history.append({"role": "user", "text": "\n\n".join(self.inboxes[name])})
             self.inboxes[name] = []
             self.emit("agent", name=name, state="thinking")
-            reply = self._call(agent)
+            timed_out = False
+            try:
+                reply = self._call(agent, self.max_seconds - elapsed)
+            except _Deadline:
+                reply, timed_out = None, True
             self._live(name, "", force=True)
             if reply is None:
-                return self._finish("stopped")
+                return self._finish("timeout" if timed_out else "stopped")
             turns += 1
             self.tokens_used += reply.tokens
             self.emit("agent", name=name, state="idle")
@@ -273,8 +283,15 @@ class Team:
         if self.save_state is not None:
             self.save_state(self.snapshot())
 
-    def _call(self, agent):
-        """Run one model call on a worker thread so a stop takes effect at once. Returns None if stopped."""
+    def _call(self, agent, remaining_seconds):
+        """Run one model call on a worker thread, so a stop or the time limit takes effect at once.
+
+        Returns None if stopped. Raises _Deadline if the time limit ends the call first. An abandoned call's
+        later text is dropped, because its call id no longer matches.
+        """
+        self._call_id += 1
+        call_id = self._call_id
+        deadline = time.monotonic() + remaining_seconds
         outcome = {}
 
         def work():
@@ -284,7 +301,7 @@ class Team:
                     self._system_prompt(agent),
                     context_view(agent.history),
                     self._tools_for(agent.name),
-                    on_text=lambda text: self._live(agent.name, text),
+                    on_text=lambda text: self._stream_text(call_id, agent.name, text),
                 )
             except Exception as error:
                 outcome["error"] = error
@@ -293,11 +310,19 @@ class Team:
         worker.start()
         while worker.is_alive():
             if self.stop_event.is_set():
+                self._call_id += 1
                 return None
+            if time.monotonic() >= deadline:
+                self._call_id += 1
+                raise _Deadline()
             worker.join(POLL_SECONDS)
         if "error" in outcome:
             raise outcome["error"]
         return outcome["reply"]
+
+    def _stream_text(self, call_id, name, text):
+        if call_id == self._call_id:
+            self._live(name, text)
 
     def _tools_for(self, name):
         if name == self.verifier:

@@ -2,12 +2,23 @@
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 from .providers import ProviderError
-from .runner import ConfigError, build_team
+from .runner import ConfigError, build_team, redact
 from .server import serve
+
+
+def _environment_secrets(config_path):
+    """The keys the command line will use, so errors can hide them."""
+    try:
+        providers = json.loads(Path(config_path).read_text()).get("providers", {})
+    except (OSError, ValueError, AttributeError):
+        return []
+    values = (os.environ.get(spec.get("api_key_env", "")) for spec in providers.values() if isinstance(spec, dict))
+    return [value for value in values if value]
 
 
 def run_once(config_path, goal, verbose):
@@ -36,12 +47,17 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     if args.command == "serve":
-        serve(args.port, args.data_dir)
+        try:
+            serve(args.port, args.data_dir)
+        except RuntimeError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
         return 0
+    secrets = _environment_secrets(args.config)
     try:
         status, answer = run_once(args.config, args.goal, args.verbose)
     except (ConfigError, ProviderError, ValueError, KeyError, OSError) as error:
-        print(f"error: {error}", file=sys.stderr)
+        print(f"error: {redact(str(error), secrets)}", file=sys.stderr)
         return 2
     if answer is None:
         print(f"The team stopped without a final answer ({status}).", file=sys.stderr)
