@@ -65,6 +65,12 @@ A run's workspace lives in `data/workspaces/<run id>/`.
 
 Approvals: a member's `approve` list names the tools whose calls wait for you. The page shows the call with its arguments. You can approve it, edit the arguments and approve, or reject it with a reason, which the agent receives. Stopping the run or reaching the time limit ends a wait without running the call.
 
+Trace: each turn is a span holding its model call and its tool calls, with durations, tokens, and errors. Download it as JSON. The span names follow the OpenTelemetry GenAI operation names (`invoke_agent`, `chat`, `execute_tool`) as labels only; the export format is not a verified standard.
+
+Step mode: set "step_mode": true in the config, or tick the box in the team editor, or toggle it during a run. The run pauses after every turn until you press Next step. A pause counts toward the time limit.
+
+Who talks to whom: a small graph shows how many messages each agent sent to each other agent in the run.
+
 Review: changes to a workspace are listed per file, with a diff for text. Accept a file to keep it, or reject it to restore the accepted version. Nothing is final until you accept it. "Download accepted files" gives a zip of accepted content only. Review is available once the run has finished or been stopped.
 
 Running code is not available. Model-written code would run on your machine, so it needs a container or similar isolation first.

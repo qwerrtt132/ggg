@@ -3,7 +3,7 @@ const token = new URLSearchParams(location.search).get("token") || "";
 history.replaceState(null, "", "/");
 
 const FINISHED = new Set(["done", "idle", "max_turns", "timeout", "token_budget", "stalled", "stopped", "failed", "interrupted", "no_progress"]);
-const EVENT_KINDS = ["roster", "agent", "message", "turn", "human", "final", "error", "status", "rewind", "branched", "approval", "approval_result"];
+const EVENT_KINDS = ["roster", "agent", "message", "turn", "human", "final", "error", "status", "rewind", "branched", "approval", "approval_result", "tool", "paused", "resumed", "step_mode"];
 const NAME_RULE = /^[a-z][a-z0-9_-]{0,31}$/;
 const DRAFT_KEY = "agent-team-draft";
 const TOOL_GROUPS = [
@@ -27,6 +27,9 @@ const state = {
   tokensUsed: 0,
   selectedTurn: null,
   rewindArmed: false,
+  paused: false,
+  stepMode: false,
+  members: [],
 };
 let cards = new Map();
 
@@ -272,6 +275,7 @@ function renderTeam() {
   $("max-turns").value = team.max_turns ?? "";
   $("max-seconds").value = team.max_seconds ?? "";
   $("max-tokens").value = team.max_tokens ?? "";
+  $("step-mode").checked = Boolean(team.step_mode);
   if (document.activeElement !== $("config")) {
     $("config").value = JSON.stringify(team, null, 2);
     $("config-error").textContent = "";
@@ -348,6 +352,12 @@ function openRun(id, goal, status) {
   state.finished = FINISHED.has(status);
   state.connection = "connecting";
   state.tokensUsed = 0;
+  state.paused = false;
+  state.stepMode = false;
+  edges.clear();
+  state.members = [];
+  drawGraph();
+  scheduleTrace();
   if (!sameRun) {
     // A different run: forget the selected turn and any approvals from the last run.
     state.selectedTurn = null;
@@ -396,7 +406,8 @@ function openRun(id, goal, status) {
 
 function refreshRunStatus() {
   const connection = state.connection === "live" ? "" : ` · ${state.connection}`;
-  $("run-status").textContent = `Status: ${state.status}${connection}`;
+  const paused = state.paused ? " · paused: press Next step to take the next turn" : "";
+  $("run-status").textContent = `Status: ${state.status}${connection}${paused}`;
 }
 
 function updateControls() {
@@ -406,6 +417,100 @@ function updateControls() {
     : "Message the lead during the run";
   $("rewind").disabled = !state.finished || state.selectedTurn === null;
   $("branch").disabled = state.selectedTurn === null;
+  const toggle = $("step-toggle");
+  toggle.disabled = !state.runId || state.finished;
+  toggle.setAttribute("aria-pressed", String(state.stepMode));
+  toggle.textContent = `Step mode: ${state.stepMode ? "on" : "off"}`;
+  $("next-step").disabled = !state.paused;
+  $("run-status").dataset.paused = String(state.paused);
+}
+
+// ---------- trace and message graph ----------
+
+let traceTimer = null;
+
+function scheduleTrace() {
+  clearTimeout(traceTimer);
+  traceTimer = setTimeout(() => attempt(loadTrace), 300);
+}
+
+async function loadTrace() {
+  if (!state.runId) return;
+  const runId = state.runId;
+  const trace = await api("GET", `/runs/${runId}/trace`);
+  if (state.runId !== runId) return;
+  $("export-trace").href = `/api/runs/${runId}/trace.json?token=${encodeURIComponent(token)}`;
+  const box = $("trace");
+  box.replaceChildren();
+  if (trace.turns.length === 0) box.append(el("p", "No turns yet.", "muted"));
+  for (const turn of trace.turns) {
+    const details = document.createElement("details");
+    details.className = "span";
+    const summary = el("summary", `${turn.name} · turn ${turn.turn} · ${turn.agent} · ${turn.duration_ms} ms · ${turn.tokens} tokens${turn.truncated ? " · cut off" : ""}`);
+    details.append(summary);
+    for (const child of turn.children) {
+      const line = child.name === "chat"
+        ? `chat · ${child.duration_ms} ms · ${child.tokens} tokens`
+        : `execute_tool · ${child.tool} · ${child.duration_ms} ms${child.is_error ? " · error" : ""}`;
+      details.append(el("div", line, child.is_error ? "span-child error" : "span-child"));
+    }
+    box.append(details);
+  }
+}
+
+// Message graph: one node per agent, one arrow per sender and recipient pair, thicker with more messages.
+const edges = new Map();
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function drawGraph() {
+  const svg = $("graph");
+  svg.replaceChildren();
+  const names = [...state.members];
+  if (names.length === 0) return;
+  const center = { x: 160, y: 120 };
+  const radius = names.length === 1 ? 0 : 85;
+  const place = new Map(
+    names.map((name, index) => {
+      const angle = (2 * Math.PI * index) / names.length - Math.PI / 2;
+      return [name, { x: center.x + radius * Math.cos(angle), y: center.y + radius * Math.sin(angle) }];
+    })
+  );
+  for (const [key, count] of edges) {
+    const [from, to] = key.split(">");
+    if (!place.has(from) || !place.has(to)) continue;
+    const a = place.get(from);
+    const b = place.get(to);
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("x1", a.x);
+    line.setAttribute("y1", a.y);
+    line.setAttribute("x2", b.x);
+    line.setAttribute("y2", b.y);
+    line.setAttribute("class", "edge");
+    line.setAttribute("stroke-width", String(Math.min(8, 1 + count)));
+    svg.append(line);
+  }
+  for (const [name, point] of place) {
+    const circle = document.createElementNS(SVG_NS, "circle");
+    circle.setAttribute("cx", point.x);
+    circle.setAttribute("cy", point.y);
+    circle.setAttribute("r", "22");
+    circle.setAttribute("class", "node");
+    circle.style.setProperty("--hue", hue(name));
+    svg.append(circle);
+    const label = document.createElementNS(SVG_NS, "text");
+    label.setAttribute("x", point.x);
+    label.setAttribute("y", point.y + 4);
+    label.setAttribute("text-anchor", "middle");
+    label.setAttribute("class", "node-label");
+    label.textContent = name;
+    svg.append(label);
+  }
+}
+
+function countMessage(sender, recipient) {
+  const key = `${sender}>${recipient}`;
+  edges.set(key, (edges.get(key) || 0) + 1);
+  drawGraph();
 }
 
 // ---------- turns: timeline, rewind, and branch ----------
@@ -417,6 +522,7 @@ function scheduleTimeline() {
   timelineTimer = setTimeout(() => attempt(async () => {
     await loadTimeline();
     await loadChanges();
+    await loadTrace();
   }), 300);
 }
 
@@ -544,6 +650,21 @@ function selectTurn(turn, agent, tokens) {
   updateControls();
 }
 
+$("step-toggle").addEventListener("click", () => {
+  if (!state.runId) return;
+  attempt(() => api("POST", `/runs/${state.runId}/step`, { enabled: !state.stepMode }));
+});
+
+$("next-step").addEventListener("click", () => {
+  if (!state.runId) return;
+  attempt(() => api("POST", `/runs/${state.runId}/advance`, {}));
+});
+
+$("step-mode").addEventListener("change", (event) => {
+  state.team.step_mode = event.target.checked;
+  changed();
+});
+
 $("rewind").addEventListener("click", () => {
   const message = $("time-message").value.trim();
   if (!message) {
@@ -584,6 +705,21 @@ function render(kind, data) {
   if (kind === "roster") return renderRoster(data);
   if (kind === "agent") return updateAgent(data);
   if (kind === "status") return finishRun(data.status);
+  if (kind === "tool") return scheduleTrace();
+  if (kind === "paused") {
+    state.paused = true;
+    updateControls();
+    return refreshRunStatus();
+  }
+  if (kind === "resumed") {
+    state.paused = false;
+    updateControls();
+    return refreshRunStatus();
+  }
+  if (kind === "step_mode") {
+    state.stepMode = data.enabled;
+    return updateControls();
+  }
   if (kind === "approval") {
     pendingApprovals.set(data.id, data);
     return renderApprovals();
@@ -602,6 +738,7 @@ function render(kind, data) {
   const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
   const item = el("li", undefined, `event ${kind}`);
   if (kind === "message") {
+    countMessage(data.sender, data.recipient);
     item.style.setProperty("--hue", hue(data.sender));
     item.append(el("div", `${data.sender} → ${data.recipient}`, "who"), el("div", data.text, "text"));
   } else if (kind === "human") {
@@ -626,14 +763,21 @@ function finishRun(status) {
   updateControls();
   attempt(loadRuns);
   scheduleTimeline();
+  scheduleTrace();
   if (state.finished) {
+    state.paused = false;
     pendingApprovals.clear();
     renderApprovals();
   }
+  updateControls();
 }
 
 function renderRoster(roster) {
   state.maxTokens = roster.max_tokens ?? null;
+  state.members = roster.members.map((member) => member.name);
+  state.stepMode = Boolean(roster.step_mode);
+  drawGraph();
+  updateControls();
   cards = new Map();
   $("cards").replaceChildren();
   for (const member of roster.members) {

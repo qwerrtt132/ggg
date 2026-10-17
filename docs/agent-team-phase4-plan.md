@@ -1,6 +1,6 @@
 # Agent team: phase 4 plan
 
-Status: M1 and M2 done. M3 done: approvals for tool calls, per-file review of workspace changes, and export of accepted files only. 108 tests passing. M4 to M6 planned, not started. Based on [the research report](../reports/Agent%20team%20tools%20research.md) and the [review of phases 1 to 3](../reports/Agent%20team%20tools%20research.md#6-what-this-means-for-us). Owner: the repo's maintainer.
+Status: M1 to M3 done. M4 done: trace view with turns, model calls, and tool calls; step mode; the message graph; trace download. 119 tests passing. M5 and M6 planned, not started. Based on [the research report](../reports/Agent%20team%20tools%20research.md) and the [review of phases 1 to 3](../reports/Agent%20team%20tools%20research.md#6-what-this-means-for-us). Owner: the repo's maintainer.
 
 Phase 4 does two things. It fixes the issues from the review, and it adds the four capabilities the research showed matter most for running agents in a way people can operate: per-step snapshots with rewind, approvals with patch-level review, a trace view, and re-planning on stall.
 

@@ -64,6 +64,13 @@ def _member_tools(spec, registry):
     return [tool for group in groups for tool in GROUPS[group]]
 
 
+def _flag(config, key):
+    value = config.get(key, False)
+    if not isinstance(value, bool):
+        raise ConfigError(f"{key} must be true or false")
+    return value
+
+
 def _member_approvals(spec, tool_names):
     approve = spec.get("approve", [])
     if not isinstance(approve, list) or any(tool not in tool_names for tool in approve):
@@ -120,6 +127,7 @@ def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None, save
         max_turns=config.get("max_turns", 30),
         max_seconds=config.get("max_seconds", 600),
         max_tokens=config.get("max_tokens", DEFAULT_MAX_TOKENS),
+        step_mode=_flag(config, "step_mode"),
         emit=emit,
         human_inbox=human_inbox,
         stop_event=stop_event,

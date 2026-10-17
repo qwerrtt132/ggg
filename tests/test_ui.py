@@ -246,6 +246,42 @@ class UiTests(unittest.TestCase):
         expect(page.locator("#changes")).to_contain_text("Nothing waiting for review")
         self.assertEqual(self.errors, [])
 
+    def test_step_mode_trace_and_graph_work_from_the_page(self):
+        from test_app import FileStub
+
+        file_server = start_http_server(("127.0.0.1", 0), FileStub)
+        self.addCleanup(file_server.server_close)
+        self.addCleanup(file_server.shutdown)
+        base = f"http://127.0.0.1:{file_server.server_port}"
+        team = {
+            "providers": {"tstub": {"type": "openai_compatible", "base_url": base}},
+            "lead": {"name": "lead", "provider": "tstub", "model": "m", "role": "plan the work"},
+            "teammates": [{"name": "writer", "provider": "tstub", "model": "m", "role": "write notes", "tools": ["files"]}],
+            "step_mode": True,
+        }
+        page = self.open_page(team=team)
+        page.click("#keys-details summary")
+        page.fill("#key-provider", "tstub")
+        page.fill("#key-value", "sk-ui-trace-6666")
+        page.click("#keys-details button[type=submit]")
+        expect(page.locator("#notice")).to_have_text("Key saved.")
+
+        page.fill("#goal", "write a note")
+        page.click("#start")
+        expect(page.locator("#run-status")).to_contain_text("paused")
+        for _ in range(8):
+            if "Status: done" in page.locator("#run-status").inner_text():
+                break
+            if page.locator("#next-step").is_enabled():
+                page.click("#next-step")
+            page.wait_for_timeout(400)
+
+        expect(page.locator("#run-status")).to_contain_text("Status: done")
+        expect(page.locator("#trace")).to_contain_text("invoke_agent")
+        expect(page.locator("#trace")).to_contain_text("execute_tool")
+        expect(page.locator("#graph text").first).to_be_visible()
+        self.assertEqual(self.errors, [])
+
     def test_missing_key_blocks_start_with_a_clear_message(self):
         page = self.open_page(provider="nokey")
         page.fill("#goal", "say hi")

@@ -148,6 +148,7 @@ class Team:
         save_state=None,
         extra_tools=None,
         on_live=None,
+        step_mode=False,
     ):
         names = [agent.name for agent in agents]
         if len(set(names)) != len(names):
@@ -173,6 +174,9 @@ class Team:
         self._call_id = 0  # identifies the current model call, so an abandoned call's late text is ignored
         self.turn_no = 0  # turns taken so far, across runs and continuations; checkpoints are keyed by it
         self.pending_approvals = {}  # call id -> _Waiting
+        self.step_mode = bool(step_mode)
+        self._gate = threading.Event()
+        self._paused = False
         self._deadline = float("inf")
         self.last_agent = None
         self.status = None
@@ -190,6 +194,7 @@ class Team:
             lead=self.lead,
             verifier=self.verifier,
             max_tokens=self.max_tokens,
+            step_mode=self.step_mode,
             members=[
                 {"name": agent.name, "role": agent.role, "model": agent.model, "provider": agent.provider.name}
                 for agent in self.agents.values()
@@ -295,10 +300,39 @@ class Team:
             recent.append(fingerprint)
             if len(recent) == STALL_REPEATS and all(same_turn(recent[0], other) for other in recent):
                 return self._finish("stalled")
+            if self.step_mode and not self._wait_for_step():
+                return self._finish("stopped")
 
     def _finish(self, status, answer=None):
         self.status = status
         return answer
+
+    def set_step_mode(self, enabled):
+        """In step mode the run pauses after every turn until step_next() is called. Turning it off resumes."""
+        self.step_mode = bool(enabled)
+        if not self.step_mode:
+            self._gate.set()
+
+    def step_next(self):
+        """Let a paused run take one more turn. Returns False if the run is not paused."""
+        if not self._paused:
+            return False
+        self._gate.set()
+        return True
+
+    def _wait_for_step(self):
+        """Pause until someone advances the run. Returns False if the run was stopped while paused."""
+        self._gate.clear()
+        self._paused = True
+        self.emit("paused", turn=self.turn_no)
+        try:
+            while not self._gate.wait(POLL_SECONDS):
+                if self.stop_event.is_set():
+                    return False
+        finally:
+            self._paused = False
+        self.emit("resumed", turn=self.turn_no)
+        return True
 
     def _live(self, name, text, force=False):
         """Report a reply's text as it streams. Updates are throttled, except the final clearing one."""
@@ -396,6 +430,7 @@ class Team:
         results, decision, failed = [], None, False
         allowed = {tool["name"] for tool in self._tools_for(sender)}
         for index, call in enumerate(calls):
+            began = time.monotonic()
             try:
                 if call.error:
                     content, is_error, outcome = f"The arguments were not valid JSON ({call.error}). Send the call again.", True, None
@@ -412,6 +447,14 @@ class Team:
                 decision = outcome
             failed = failed or is_error
             results.append(_result(call, content, is_error))
+            self.emit(
+                "tool",
+                agent=sender,
+                turn=self.turn_no,
+                tool=call.name,
+                is_error=is_error,
+                duration_ms=round((time.monotonic() - began) * 1000),
+            )
         return results, decision, failed, None
 
     def _await_approval(self, sender, call):

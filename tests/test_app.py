@@ -202,6 +202,97 @@ class FileStub(BaseHTTPRequestHandler):
         pass
 
 
+class TraceAndStepTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        env = mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"})
+        env.start()
+        self.addCleanup(env.stop)
+        stub = start_http_server(("127.0.0.1", 0), TwoAgentStub)
+        self.addCleanup(stub.server_close)
+        self.addCleanup(stub.shutdown)
+        self.stub_base = f"http://127.0.0.1:{stub.server_port}"
+        self.store = Store(self.root / "data" / "agent_team.db")
+        self.addCleanup(self.store.db.close)
+        vault = KeyVault(self.root / "data", master_key_path=self.root / "master.key")
+        vault.set("stub", "sk-trace-6666")
+        self.server = Server(0, App(self.store, vault, "tok", workspaces=self.root / "workspaces"))
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+
+    def call(self, method, path, body=None):
+        request = urllib.request.Request(
+            self.base + path,
+            data=json.dumps(body).encode() if body is not None else None,
+            method=method,
+            headers={"X-Session-Token": "tok", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status, response.headers, response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, error.headers, error.read()
+
+    def config(self, **extra):
+        config = {
+            "providers": {"stub": {"type": "openai_compatible", "base_url": self.stub_base}},
+            "lead": {"name": "lead", "provider": "stub", "model": "m", "role": "plan"},
+            "teammates": [{"name": "writer", "provider": "stub", "model": "m", "role": "write"}],
+        }
+        config.update(extra)
+        return config
+
+    def wait_for_kind(self, run_id, kind, count, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            seen = [row for row in self.store.events_after(run_id, 0) if row[1] == kind]
+            if len(seen) >= count:
+                return
+            time.sleep(0.03)
+        raise AssertionError(f"fewer than {count} {kind} events")
+
+    def test_the_trace_lists_every_turn_with_its_tool_calls(self):
+        _, _, body = self.call("POST", "/api/runs", {"config": self.config(), "goal": "write a note"})
+        run_id = json.loads(body)["id"]
+        self.call("GET", f"/api/runs/{run_id}/events")
+
+        _, _, raw = self.call("GET", f"/api/runs/{run_id}/trace")
+        turns = json.loads(raw)["turns"]
+        self.assertEqual([turn["agent"] for turn in turns], ["lead", "writer", "lead"])
+        self.assertIn("send_message", [child.get("tool") for child in turns[0]["children"]])
+
+        _, headers, exported = self.call("GET", f"/api/runs/{run_id}/trace.json")
+        self.assertIn("attachment", headers["Content-Disposition"])
+        self.assertEqual(json.loads(exported)["run"]["id"], run_id)
+
+    def test_step_mode_waits_for_each_advance(self):
+        _, _, body = self.call("POST", "/api/runs", {"config": self.config(step_mode=True), "goal": "write a note"})
+        run_id = json.loads(body)["id"]
+
+        self.wait_for_kind(run_id, "paused", 1)
+        for pauses in (1, 2):
+            status, _, _ = self.call("POST", f"/api/runs/{run_id}/advance", {})
+            self.assertEqual(status, 202)
+            if pauses == 1:
+                self.wait_for_kind(run_id, "paused", 2)
+        _, _, events = self.call("GET", f"/api/runs/{run_id}/events")
+
+        self.assertEqual(events.decode().count("event: paused"), 2)
+        self.assertEqual(events.decode().count("event: final"), 1)
+
+    def test_advancing_a_run_that_is_not_paused_is_refused(self):
+        _, _, body = self.call("POST", "/api/runs", {"config": self.config(), "goal": "write a note"})
+        run_id = json.loads(body)["id"]
+        self.call("GET", f"/api/runs/{run_id}/events")
+
+        status, _, _ = self.call("POST", f"/api/runs/{run_id}/advance", {})
+        self.assertEqual(status, 409)
+
+
 class ReviewTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()

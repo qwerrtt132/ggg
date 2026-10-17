@@ -64,6 +64,9 @@
           <select id="template-select"></select>
         </label>
       </div>
+      <label class="inline">
+        <input id="step-mode" type="checkbox"> pause after every turn (step mode)
+      </label>
       <button id="reset-team" type="button" class="secondary">Reset to example team</button>
 
       <details>
@@ -104,6 +107,10 @@
       <div class="run-head">
         <h2 id="run-title">No run selected</h2>
         <p id="run-status" class="muted" role="status"></p>
+        <div class="step-controls">
+          <button id="step-toggle" type="button" class="secondary" aria-pressed="false" disabled>Step mode: off</button>
+          <button id="next-step" type="button" disabled>Next step</button>
+        </div>
         <p class="exports">
           <a id="export-md" class="button-link secondary" download>Export Markdown</a>
           <a id="export-json" class="button-link secondary" download>Export JSON</a>
@@ -139,6 +146,17 @@
           </div>
           <p id="time-note" class="muted"></p>
         </div>
+      </section>
+      <section class="trace-section" aria-labelledby="trace-title">
+        <h3 id="trace-title">Trace</h3>
+        <div id="trace" class="trace"></div>
+        <p class="exports">
+          <a id="export-trace" class="button-link secondary" download>Download trace (JSON)</a>
+        </p>
+      </section>
+      <section class="graph-section" aria-labelledby="graph-title">
+        <h3 id="graph-title">Who talks to whom</h3>
+        <svg id="graph" class="graph" viewBox="0 0 320 240" role="img" aria-label="Message graph of this run"></svg>
       </section>
       <ol id="feed" class="feed" role="log" aria-live="polite" aria-label="Run messages"></ol>
       <form id="human-form" class="inline-form">

@@ -392,6 +392,79 @@ def wait_for_event(events, kind, timeout=5):
     raise AssertionError(f"no {kind} event within {timeout} seconds")
 
 
+def count_events(events, kind):
+    return sum(1 for name, _ in list(events) if name == kind)
+
+
+def wait_for_count(events, kind, count, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if count_events(events, kind) >= count:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"fewer than {count} {kind} events within {timeout} seconds")
+
+
+class StepModeTests(unittest.TestCase):
+    def team(self, events, **options):
+        lead = ScriptedProvider(reply(call("send_message", to="writer", message="draft")), reply(call("finish", answer="ok")))
+        writer = ScriptedProvider(reply(call("send_message", to="lead", message="here")))
+        team = Team(
+            [Agent("lead", "plans", lead, "m"), Agent("writer", "writes", writer, "m")],
+            lead="lead",
+            emit=lambda kind, **data: events.append((kind, data)),
+            **options,
+        )
+        return team, lead, writer
+
+    def start(self, team):
+        result = {}
+        worker = threading.Thread(target=lambda: result.update(answer=team.run("goal")))
+        worker.start()
+        self.addCleanup(worker.join, 5)
+        return result, worker
+
+    def test_step_mode_pauses_after_each_turn_until_advanced(self):
+        events = []
+        team, lead, writer = self.team(events, step_mode=True)
+        result, worker = self.start(team)
+
+        wait_for_count(events, "paused", 1)
+        self.assertEqual((len(lead.calls), len(writer.calls)), (1, 0))
+        team.step_next()
+        wait_for_count(events, "paused", 2)
+        self.assertEqual(len(writer.calls), 1)
+        team.step_next()
+        worker.join(5)
+
+        self.assertEqual(result["answer"], "ok")
+        self.assertEqual(count_events(events, "paused"), 2)
+
+    def test_turning_step_mode_off_releases_a_pause(self):
+        events = []
+        team, _, _ = self.team(events, step_mode=True)
+        result, worker = self.start(team)
+
+        wait_for_count(events, "paused", 1)
+        team.set_step_mode(False)
+        worker.join(5)
+
+        self.assertEqual(result["answer"], "ok")
+        self.assertEqual(count_events(events, "paused"), 1)
+
+    def test_stopping_while_paused_ends_the_run(self):
+        events = []
+        stop = threading.Event()
+        team, _, _ = self.team(events, step_mode=True, stop_event=stop)
+        result, worker = self.start(team)
+
+        wait_for_count(events, "paused", 1)
+        stop.set()
+        worker.join(5)
+
+        self.assertEqual(team.status, "stopped")
+
+
 class ApprovalTests(unittest.TestCase):
     def team(self, writer_replies, events, stop=None):
         from agent_team.tools import build_tools
@@ -460,6 +533,17 @@ class ApprovalTests(unittest.TestCase):
         self.assertEqual(last["role"], "tool")
         self.assertTrue(last["is_error"])
         self.assertIn("stopped", last["content"])
+
+    def test_each_tool_call_reports_its_turn_duration_and_outcome(self):
+        events = []
+        lead = ScriptedProvider(reply(call("send_message", to="ghost", message="x")), reply(call("finish", answer="ok")))
+        team = Team([Agent("lead", "plans", lead, "m")], lead="lead", emit=lambda kind, **data: events.append((kind, data)))
+        team.run("goal")
+
+        tools = [data for kind, data in events if kind == "tool"]
+        self.assertEqual(len(tools), 2)
+        self.assertEqual((tools[0]["agent"], tools[0]["turn"], tools[0]["tool"], tools[0]["is_error"]), ("lead", 1, "send_message", True))
+        self.assertGreaterEqual(tools[0]["duration_ms"], 0)
 
     def test_a_decision_for_an_unknown_call_is_refused(self):
         team = self.team([reply(text="nothing")], [])

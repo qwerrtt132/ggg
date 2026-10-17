@@ -20,6 +20,7 @@ from .runner import ConfigError, build_team, check_provider, default_config, red
 from .store import FINISHED, Store
 from .templates import TEMPLATES
 from .review import WorkspaceReview
+from .trace import build_trace
 from .tools import ToolError, build_tools, copy_workspace
 from .transcript import to_json, to_markdown
 
@@ -176,7 +177,43 @@ class Handler(BaseHTTPRequestHandler):
                 return self._rewind(run_id)
             if method == "POST" and parts[2] == "branch":
                 return self._branch(run_id)
+            if method == "GET" and parts[2] == "trace":
+                return self._send_json(200, self._trace(run_id))
+            if method == "GET" and parts[2] == "trace.json":
+                body = json.dumps(self._trace(run_id), indent=2).encode()
+                return self._send(
+                    200,
+                    body,
+                    "application/json; charset=utf-8",
+                    {"Content-Disposition": f'attachment; filename="trace-{run_id[:8]}.json"'},
+                )
+            if method == "POST" and parts[2] == "advance":
+                return self._advance(run_id)
+            if method == "POST" and parts[2] == "step":
+                return self._set_step(run_id)
         self._send_json(404, {"error": "not found"})
+
+    def _trace(self, run_id):
+        store = self.server.app.store
+        return build_trace(store.get_run(run_id), store.get_run_events(run_id))
+
+    def _advance(self, run_id):
+        control = self.server.app.runs.get(run_id)
+        if control is None or not control.team.step_next():
+            return self._send_json(409, {"error": "this run is not paused, so there is no step to advance"})
+        self._send_json(202, {"ok": True})
+
+    def _set_step(self, run_id):
+        app = self.server.app
+        enabled = self._body().get("enabled")
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be true or false")
+        control = app.runs.get(run_id)
+        if control is None or not control.thread.is_alive():
+            return self._send_json(409, {"error": "this run is not running"})
+        control.team.set_step_mode(enabled)
+        app.store.add_event(run_id, "step_mode", {"enabled": enabled})
+        self._send_json(202, {"enabled": enabled})
 
     def _review_for(self, run_id):
         app = self.server.app

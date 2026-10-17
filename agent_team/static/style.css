@@ -266,3 +266,15 @@ summary { cursor: pointer; color: var(--muted); }
 .change { border-top: 1px solid var(--line); padding: 8px 0; }
 .change .accept, .change .reject { margin-right: 6px; }
 .reason { width: auto; min-width: 220px; margin-top: 6px; }
+
+.step-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 10px; }
+.step-controls button { margin-top: 0; }
+.trace-section, .graph-section { margin: 8px 0 12px; }
+.trace details.span { border-top: 1px solid var(--line); padding: 4px 0; }
+.trace summary { cursor: pointer; font-size: 0.9rem; }
+.span-child { font-size: 0.85rem; color: var(--muted); padding-left: 16px; }
+.span-child.error { color: var(--error); }
+.graph { width: 100%; max-width: 420px; height: auto; }
+.graph .edge { stroke: var(--muted); stroke-linecap: round; opacity: 0.7; }
+.graph .node { fill: hsl(var(--hue, 210) 60% 50%); }
+.graph .node-label { fill: #fff; font-size: 12px; font-weight: 600; }
