@@ -10,7 +10,7 @@ from .providers import ProviderError, build_provider
 from .team import Agent, Team
 from .tools import GROUPS
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "team.example.json"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "default_team.json"
 NAME_RULE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 

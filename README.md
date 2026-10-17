@@ -2,48 +2,64 @@
 
 ## Agent team
 
-`agent_team` runs a team of AI agents that message each other toward a goal. Each agent can use a different provider and model. You can run it from a web page, where you enter your own API keys, or from the command line.
+`agent_team` runs a team of AI agents that message each other toward a goal. Each agent can use a different provider and model. You bring your own API keys. You can run it from a web page, or from the command line.
 
 Supported providers:
 - `anthropic`: the Anthropic Messages API
-- `openai_compatible`: any server with a `POST {base_url}/chat/completions` endpoint, such as OpenAI, DeepSeek, Groq, or a local Ollama server
+- `openai_compatible`: any server with a `POST {base_url}/chat/completions` endpoint that supports tool calling, such as OpenAI, DeepSeek, Groq, or a local Ollama server
 
-No dependencies beyond Python 3.10+ and `cryptography` (only needed to save keys to disk).
+### Install
+
+Python 3.10 or newer.
 
 ```bash
-pip install cryptography
+pip install .                 # provides the `agent-team` command
+pip install ".[ui-tests]"     # also installs Playwright for the browser tests
 ```
+
+Without installing, run it from the repository with `python -m agent_team`.
 
 ### Web app
 
 ```bash
-python -m agent_team serve            # http://127.0.0.1:8765
+agent-team serve              # http://127.0.0.1:8765, data in ./data
 ```
 
 The command prints a link with a session token. Open it in your browser. The page lets you:
-- Build the team with a form: member names, roles, providers, and models, plus a verifier and limits. The raw JSON is under "Advanced". Start is disabled until the team is ready, and the page says what is missing.
+- Build the team with a form: member names, roles, providers, models, tools, a verifier, and limits. Start stays disabled until the team is ready, and the page says what is missing. The raw JSON is under "Advanced".
+- Add a member from a role template (researcher, writer, critic, verifier, coder).
+- Save a team as a preset, and load it again later.
 - Test a key with one tiny request, using the model of a team member that uses that provider.
-- Continue a finished run by sending a message. The agents keep their history, as long as the server has not restarted.
-- Enter API keys. They stay on the server, in memory, unless you tick "save encrypted". Saved keys are encrypted with a master key in `~/.config/agent_team/master.key` (override with `AGENT_TEAM_MASTER_KEY_FILE`). Back up that file. Without it, saved keys cannot be read and must be entered again.
-- Edit the team as JSON, enter a goal, and start a run.
-- Watch messages, token use, and the final answer stream in live.
+- Watch messages, agent states, and token use stream in live, with a meter against the budget.
 - Send the lead a message during a run, or stop the run.
-- Reopen past runs. Their history is kept in `data/agent_team.db`.
+- Continue a finished run by sending a message. This works after a server restart too, because the team's histories are saved after every turn.
+- Export a run as Markdown or JSON.
 
-The server listens only on 127.0.0.1 and rejects requests from other hosts or origins. `data/` holds run history and any saved keys, and it is git-ignored.
+Keys: enter them in the API keys panel. They stay on the server and are never shown in full. They live in memory unless you tick "save encrypted". Saved keys are encrypted with a master key at `~/.config/agent_team/master.key` (override with `AGENT_TEAM_MASTER_KEY_FILE`). Back up that file. Without it, saved keys cannot be read and must be entered again. A key can also come from an environment variable named in the provider's config (`api_key_env`), and the page only shows whether that variable is set.
+
+Configs never hold keys. A config with a key field is refused.
+
+The server listens only on 127.0.0.1 and rejects requests from other hosts or origins. `data/` holds run history, presets, workspaces, and any saved keys. It is git-ignored.
 
 ### Command line
-
-Keys come from the environment variables named in the config:
 
 ```bash
 export ANTHROPIC_API_KEY=...
 export OPENAI_API_KEY=...
-cp team.example.json team.json   # then edit roles, models, and providers
-python -m agent_team run team.json "Write a one-page guide to our release process" -v
+agent-team run agent_team/default_team.json "Write a one-page guide to our release process" -v
 ```
 
-`-v` prints each message between agents to stderr. The final answer goes to stdout.
+`-v` prints each message between agents to stderr. The final answer goes to stdout. Copy `agent_team/default_team.json` to edit a team.
+
+### Team members and tools
+
+Each member has a name, a role, a provider, a model, and optional `tools`:
+- `files`: list, read, and write files in the run's workspace. Paths outside the workspace and symbolic links are refused.
+- `fetch`: read an http or https page as text. Private, loopback, and link-local addresses are refused, including on redirects.
+
+A run's workspace lives in `data/workspaces/<run id>/`.
+
+Running code is not available. Model-written code would run on your machine, so it needs a container or similar isolation first.
 
 ### How a team works
 
@@ -53,13 +69,13 @@ python -m agent_team run team.json "Write a one-page guide to our release proces
   - `finish(answer)`: the lead only. Ends the run with the answer for you.
   - `submit_verdict(passed, feedback)`: the verifier only.
 - If the config names a `verifier`, the lead's `finish` goes to that agent first. The run ends only when it passes the answer. Otherwise the lead gets the feedback and revises.
+- An agent that used a file or fetch tool gets another turn to act on the result.
 - An agent whose reply has no tool call is told to use a tool. Two such replies in a row end the run.
 - The model's output limit can cut a reply short. The agent is told to keep messages shorter, and the feed marks the turn.
 - Rate limits and server errors are retried with backoff (up to 4 attempts, honoring `Retry-After`).
 - Only the most recent 16 history items are sent to the model, so long runs cost less.
 - At most 3 runs execute at once. Stop takes effect immediately, even during a model call.
 - Limits stop runaway runs, and the run status says which one applied: `max_turns`, `max_seconds` (`timeout`), `max_tokens` (`token_budget`), a repeated turn (`stalled`), `no_progress`, `stopped`, `failed`, `idle` when no one has anything left to do, or `interrupted` after a restart.
-- The `openai_compatible` provider needs a server with tool calling. Plain chat-only servers will fail.
 
 ### Tests
 
@@ -67,4 +83,10 @@ python -m agent_team run team.json "Write a one-page guide to our release proces
 python -m unittest discover -s tests
 ```
 
-The tests use scripted replies and local stub servers, so they don't call any real API.
+The tests use scripted replies and local stub servers, so they don't call any real API. The browser tests need Playwright and a Chromium binary, and skip themselves when either is missing. Set `AGENT_TEAM_CHROME` to choose the Chromium binary.
+
+### Known limits
+
+- Streamed output: the model's reply appears when the call finishes, not word by word. Planned, not yet built.
+- The fetch tool checks an address before connecting. A name whose address changes between the check and the connection could still reach a private address. Treat fetch as reading public pages, not as a hardened proxy.
+- The `openai_compatible` provider needs a server with tool calling. Chat-only servers fail.
