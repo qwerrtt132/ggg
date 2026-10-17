@@ -104,6 +104,36 @@ class KeyVaultTests(unittest.TestCase):
             KeyVault(data, master_key_path=other).get("openai")
 
 
+class TranscriptTests(unittest.TestCase):
+    def test_markdown_shows_messages_answer_and_end_status(self):
+        from agent_team.transcript import to_markdown
+
+        run = {"goal": "Write a note", "status": "done", "created_at": 0, "finished_at": 5}
+        events = [
+            {"kind": "message", "data": {"sender": "lead", "recipient": "writer", "text": "draft it"}},
+            {"kind": "final", "data": {"answer": "hello"}},
+            {"kind": "status", "data": {"status": "done"}},
+        ]
+
+        text = to_markdown(run, events)
+        self.assertIn("# Write a note", text)
+        self.assertIn("**lead → writer**", text)
+        self.assertIn("> draft it", text)
+        self.assertIn("## Final answer\n\nhello", text)
+        self.assertIn("*Run ended: done*", text)
+
+    def test_json_keeps_every_event(self):
+        import json as json_module
+        from agent_team.transcript import to_json
+
+        run = {"id": "r1", "goal": "g", "status": "done", "created_at": 0, "finished_at": 1}
+        events = [{"kind": "human", "data": {"text": "hi"}, "created_at": 0}]
+
+        document = json_module.loads(to_json(run, events))
+        self.assertEqual(document["run"]["id"], "r1")
+        self.assertEqual(document["events"], events)
+
+
 class ServerTests(unittest.TestCase):
     TOKEN = "test-token"
 
@@ -260,6 +290,53 @@ class ServerTests(unittest.TestCase):
 
         self.assertEqual(status, 400)
         self.assertIn("needs a name", json.loads(body)["error"])
+
+    def test_presets_save_list_load_and_delete(self):
+        config = self.stub_config()
+        status, _ = self.request("POST", "/api/presets", {"name": "stub team", "config": config})
+        self.assertEqual(status, 201)
+
+        status, body = self.request("GET", "/api/presets")
+        self.assertEqual([preset["name"] for preset in json.loads(body)["presets"]], ["stub team"])
+
+        status, body = self.request("GET", "/api/presets/stub%20team")
+        self.assertEqual(json.loads(body)["config"]["lead"]["name"], "lead")
+
+        status, body = self.request("DELETE", "/api/presets/stub%20team")
+        self.assertEqual(json.loads(body)["presets"], [])
+        status, _ = self.request("GET", "/api/presets/stub%20team")
+        self.assertEqual(status, 404)
+
+    def test_presets_refuse_keys_and_empty_names(self):
+        config = self.stub_config()
+        config["providers"]["stub"]["api_key"] = "sk-in-preset"
+        status, body = self.request("POST", "/api/presets", {"name": "bad", "config": config})
+        self.assertEqual(status, 400)
+        self.assertNotIn("sk-in-preset", body)
+
+        status, _ = self.request("POST", "/api/presets", {"name": "  ", "config": self.stub_config()})
+        self.assertEqual(status, 400)
+
+    def test_templates_are_listed(self):
+        status, body = self.request("GET", "/api/templates")
+
+        self.assertEqual(status, 200)
+        self.assertIn("researcher", [template["id"] for template in json.loads(body)["templates"]])
+
+    def test_a_finished_run_exports_as_markdown_and_json(self):
+        self.request("POST", "/api/keys", {"provider": "stub", "key": "sk-export-2222"})
+        status, body = self.request("POST", "/api/runs", {"config": self.stub_config(), "goal": "say hi"})
+        run_id = json.loads(body)["id"]
+        self.request("GET", f"/api/runs/{run_id}/events")
+
+        status, markdown = self.request("GET", f"/api/runs/{run_id}/export?format=md")
+        self.assertEqual(status, 200)
+        self.assertIn("## Final answer", markdown)
+        self.assertIn("hello from stub", markdown)
+
+        status, raw = self.request("GET", f"/api/runs/{run_id}/export?format=json")
+        self.assertEqual(json.loads(raw)["run"]["goal"], "say hi")
+        self.assertNotIn("sk-export-2222", markdown + raw)
 
     def test_saved_key_is_encrypted_on_disk(self):
         self.request("POST", "/api/keys", {"provider": "stub", "key": "sk-saved-9999", "persist": True})

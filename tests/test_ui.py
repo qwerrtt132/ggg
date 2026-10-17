@@ -109,6 +109,28 @@ class UiTests(unittest.TestCase):
         self.assertNotIn("sk-ui-1234", page.content())
         self.assertEqual(self.errors, [])
 
+    def test_templates_and_presets_work_in_the_browser(self):
+        page = self.open_page()
+        expect(page.locator("#members .member")).to_have_count(1)
+
+        page.select_option("#template-select", "writer")
+        expect(page.locator("#members .member")).to_have_count(2)
+        self.assertIn("Draft the content", page.locator("#members .member").nth(1).locator("textarea").input_value())
+        self.assertTrue(page.locator("#members .member").nth(1).locator("input[type=checkbox]").first.is_checked())
+
+        page.evaluate("document.querySelector('details:has(#preset-select)').open = true")
+        page.fill("#preset-name", "my stub team")
+        page.click("#preset-form button[type=submit]")
+        expect(page.locator("#notice")).to_contain_text("Saved “my stub team”")
+        expect(page.locator("#preset-select option")).to_contain_text(["my stub team"])
+
+        page.click("#reset-team")
+        expect(page.locator("#members .member")).to_have_count(4)  # the example team: lead and three teammates
+        page.select_option("#preset-select", "my stub team")
+        page.click("#preset-load")
+        expect(page.locator("#members .member")).to_have_count(2)
+        self.assertEqual(self.errors, [])
+
     def test_missing_key_blocks_start_with_a_clear_message(self):
         page = self.open_page(provider="nokey")
         page.fill("#goal", "say hi")

@@ -25,6 +25,11 @@ CREATE TABLE IF NOT EXISTS events (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_by_run ON events (run_id, seq);
+CREATE TABLE IF NOT EXISTS presets (
+    name TEXT PRIMARY KEY,
+    config TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -54,6 +59,36 @@ class Store:
                 "INSERT INTO runs (id, goal, status, created_at, config) VALUES (?, ?, 'running', ?, ?)",
                 (run_id, goal, time.time(), json.dumps(config) if config is not None else None),
             )
+
+    def save_preset(self, name, config):
+        with self.lock:
+            self.db.execute(
+                "INSERT INTO presets (name, config, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET config = excluded.config, updated_at = excluded.updated_at",
+                (name, json.dumps(config), time.time()),
+            )
+
+    def list_presets(self):
+        with self.lock:
+            rows = self.db.execute("SELECT name, updated_at FROM presets ORDER BY name").fetchall()
+        return [{"name": name, "updated_at": updated_at} for name, updated_at in rows]
+
+    def get_preset(self, name):
+        with self.lock:
+            row = self.db.execute("SELECT config FROM presets WHERE name = ?", (name,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def delete_preset(self, name):
+        with self.lock:
+            self.db.execute("DELETE FROM presets WHERE name = ?", (name,))
+
+    def get_run_events(self, run_id):
+        """Every event of a run, in order, for exports."""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT kind, data, created_at FROM events WHERE run_id = ? ORDER BY seq", (run_id,)
+            ).fetchall()
+        return [{"kind": kind, "data": json.loads(data), "created_at": created_at} for kind, data, created_at in rows]
 
     def save_state(self, run_id, snapshot):
         with self.lock:

@@ -11,13 +11,15 @@ import uuid
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .keys import KeyVault, KeyVaultError
 from .providers import ProviderError
-from .runner import ConfigError, build_team, check_provider, default_config, redact, run_in_background
+from .runner import ConfigError, build_team, check_provider, default_config, redact, refuse_secret_fields, run_in_background
 from .store import FINISHED, Store
+from .templates import TEMPLATES
 from .tools import build_tools
+from .transcript import to_json, to_markdown
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC_FILES = {
@@ -84,7 +86,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(403, {"error": "this server only answers requests from its own page"})
         url = urlparse(self.path)
         query = parse_qs(url.query)
-        parts = [part for part in url.path.split("/") if part]
+        parts = [unquote(part) for part in url.path.split("/") if part]
         try:
             if method == "GET" and not parts:
                 return self._send_static("index.html")
@@ -111,6 +113,10 @@ class Handler(BaseHTTPRequestHandler):
             )
         if method == "POST" and len(parts) == 3 and parts[0] == "providers" and parts[2] == "test":
             return self._test_provider(parts[1])
+        if method == "GET" and parts == ["templates"]:
+            return self._send_json(200, {"templates": TEMPLATES})
+        if parts[:1] == ["presets"]:
+            return self._presets(method, parts[1:])
         if method == "POST" and parts == ["keys"]:
             body = self._body()
             provider = str(body.get("provider", ""))
@@ -131,6 +137,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(404, {"error": "unknown run"})
             if method == "GET" and parts[2] == "events":
                 return self._stream(run_id, query)
+            if method == "GET" and parts[2] == "export":
+                return self._export(run_id, query)
             if method == "POST" and parts[2] == "message":
                 return self._human_message(run_id)
             if method == "POST" and parts[2] == "stop":
@@ -193,6 +201,44 @@ class Handler(BaseHTTPRequestHandler):
             team.restore(record["state"])
         control.team, control.secrets = team, secrets
         return control
+
+    def _presets(self, method, rest):
+        store = self.server.app.store
+        if method == "GET" and not rest:
+            return self._send_json(200, {"presets": store.list_presets()})
+        if method == "POST" and not rest:
+            body = self._body()
+            name = str(body.get("name", "")).strip()
+            if not 1 <= len(name) <= 60:
+                raise ValueError("a preset needs a name of 1 to 60 characters")
+            config = body.get("config")
+            if not isinstance(config, dict):
+                raise ValueError("a preset needs a team config")
+            refuse_secret_fields(config)
+            store.save_preset(name, config)
+            return self._send_json(201, {"presets": store.list_presets()})
+        if len(rest) == 1 and method == "GET":
+            config = store.get_preset(rest[0])
+            if config is None:
+                return self._send_json(404, {"error": "no preset with that name"})
+            return self._send_json(200, {"config": config})
+        if len(rest) == 1 and method == "DELETE":
+            store.delete_preset(rest[0])
+            return self._send_json(200, {"presets": store.list_presets()})
+        self._send_json(404, {"error": "not found"})
+
+    def _export(self, run_id, query):
+        store = self.server.app.store
+        run = store.get_run(run_id)
+        events = store.get_run_events(run_id)
+        fmt = (query.get("format") or ["md"])[0]
+        if fmt == "md":
+            body, content_type, extension = to_markdown(run, events).encode(), "text/markdown; charset=utf-8", "md"
+        elif fmt == "json":
+            body, content_type, extension = to_json(run, events).encode(), "application/json; charset=utf-8", "json"
+        else:
+            raise ValueError("format must be md or json")
+        self._send(200, body, content_type, {"Content-Disposition": f'attachment; filename="run-{run_id[:8]}.{extension}"'})
 
     def _active_runs(self):
         return sum(1 for control in self.server.app.runs.values() if control.thread.is_alive())
@@ -283,10 +329,10 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(self, status, payload):
         self._send(status, json.dumps(payload).encode(), "application/json; charset=utf-8")
 
-    def _send(self, status, body, content_type):
+    def _send(self, status, body, content_type, headers=None):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        for name, value in SECURITY_HEADERS.items():
+        for name, value in {**SECURITY_HEADERS, **(headers or {})}.items():
             self.send_header(name, value)
         if body is not None:
             self.send_header("Content-Length", str(len(body)))

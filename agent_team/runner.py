@@ -44,6 +44,16 @@ def _check_limit(config, key, default, minimum):
 SECRET_FIELDS = {"api_key", "key", "secret", "token", "password"}
 
 
+def refuse_secret_fields(config):
+    """Configs are saved with runs and presets, so keys must never sit inside them."""
+    providers = config.get("providers", {})
+    if not isinstance(providers, dict):
+        raise ConfigError("providers must be an object")
+    for name, spec in providers.items():
+        if isinstance(spec, dict) and SECRET_FIELDS & set(spec):
+            raise ConfigError(f"provider {name!r} has a key field in the config; enter keys in the API keys panel")
+
+
 def _member_tools(spec, registry):
     groups = spec.get("tools", [])
     if not isinstance(groups, list) or any(group not in GROUPS for group in groups):
@@ -57,11 +67,7 @@ def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None, save
     """Returns (team, secrets). lookup_key(provider) gives a key from the vault, or None to fall back to the env var."""
     if not isinstance(config, dict):
         raise ConfigError("the team config must be a JSON object")
-    if not isinstance(config.get("providers", {}), dict):
-        raise ConfigError("providers must be an object")
-    for name, spec in config.get("providers", {}).items():
-        if isinstance(spec, dict) and SECRET_FIELDS & set(spec):
-            raise ConfigError(f"provider {name!r} has a key field in the config; enter keys in the API keys panel")
+    refuse_secret_fields(config)
     try:
         lead_spec = config["lead"]
         teammate_specs = config["teammates"]

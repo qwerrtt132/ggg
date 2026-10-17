@@ -325,6 +325,8 @@ async function loadRuns() {
 
 function openRun(id, goal, status) {
   if (state.stream) state.stream.close();
+  $("export-md").href = `/api/runs/${id}/export?format=md&token=${encodeURIComponent(token)}`;
+  $("export-json").href = `/api/runs/${id}/export?format=json&token=${encodeURIComponent(token)}`;
   state.runId = id;
   state.goal = goal;
   state.status = status;
@@ -470,6 +472,21 @@ function hue(name) {
 
 // ---------- forms and buttons ----------
 
+async function loadTemplates() {
+  const { templates } = await api("GET", "/templates");
+  state.templates = templates;
+  const select = $("template-select");
+  select.replaceChildren(new Option("Choose a template…", ""));
+  for (const template of templates) select.append(new Option(template.name, template.id));
+}
+
+async function loadPresets() {
+  const { presets } = await api("GET", "/presets");
+  const select = $("preset-select");
+  select.replaceChildren(new Option(presets.length ? "Choose a saved team…" : "No saved teams yet", ""));
+  for (const preset of presets) select.append(new Option(preset.name, preset.name));
+}
+
 async function loadState() {
   const data = await api("GET", "/providers");
   state.keys = data.keys;
@@ -477,7 +494,7 @@ async function loadState() {
   state.defaultConfig = data.default_config;
   state.team = loadDraft() || structuredClone(data.default_config);
   renderTeam();
-  await loadRuns();
+  await Promise.all([loadRuns(), loadTemplates(), loadPresets()]);
 }
 
 $("key-form").addEventListener("submit", (event) => {
@@ -511,6 +528,56 @@ $("add-member").addEventListener("click", () => {
 $("reset-team").addEventListener("click", () => {
   state.team = structuredClone(state.defaultConfig);
   renderTeam();
+});
+
+$("template-select").addEventListener("change", (event) => {
+  const template = state.templates.find((item) => item.id === event.target.value);
+  event.target.value = "";
+  if (!template) return;
+  const taken = new Set([state.team.lead.name, ...state.team.teammates.map((member) => member.name)]);
+  let name = template.id;
+  let number = 2;
+  while (taken.has(name)) name = `${template.id}_${number++}`;
+  state.team.teammates.push({
+    name,
+    role: template.role,
+    provider: Object.keys(state.team.providers)[0],
+    model: state.team.lead.model,
+    tools: template.tools,
+  });
+  renderTeam();
+});
+
+$("preset-load").addEventListener("click", () => {
+  const name = $("preset-select").value;
+  if (!name) return;
+  attempt(async () => {
+    state.team = (await api("GET", `/presets/${encodeURIComponent(name)}`)).config;
+    renderTeam();
+    showNotice(`Loaded “${name}”.`, "ok");
+  });
+});
+
+$("preset-delete").addEventListener("click", () => {
+  const name = $("preset-select").value;
+  if (!name) return;
+  attempt(async () => {
+    await api("DELETE", `/presets/${encodeURIComponent(name)}`);
+    await loadPresets();
+    showNotice(`Deleted “${name}”.`, "ok");
+  });
+});
+
+$("preset-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const name = $("preset-name").value.trim();
+  attempt(async () => {
+    await api("POST", "/presets", { name, config: state.team });
+    $("preset-name").value = "";
+    await loadPresets();
+    $("preset-select").value = name;
+    showNotice(`Saved “${name}”.`, "ok");
+  });
 });
 
 $("verifier").addEventListener("change", (event) => {
