@@ -358,6 +358,9 @@ function openRun(id, goal, status) {
       if (state.stream === stream) render(kind, JSON.parse(event.data));
     });
   }
+  stream.addEventListener("live", (event) => {
+    if (state.stream === stream) updateLive(JSON.parse(event.data));
+  });
   stream.addEventListener("end", () => {
     if (state.stream !== stream) return;
     stream.close();
@@ -420,14 +423,16 @@ function renderRoster(roster) {
     card.style.setProperty("--hue", hue(member.name));
     const stateLine = el("div", "idle", "card-state");
     const tokens = el("div", "0 tokens", "muted");
+    const preview = el("div", "", "preview");
     card.append(
       el("div", member.name, "card-title"),
       el("div", `${role} · ${member.model} · ${member.provider}`, "muted"),
       stateLine,
+      preview,
       tokens
     );
     $("cards").append(card);
-    cards.set(member.name, { card, stateLine, tokens, used: 0 });
+    cards.set(member.name, { card, stateLine, tokens, preview, used: 0 });
   }
   $("meter").hidden = false;
   updateMeter();
@@ -438,6 +443,13 @@ function updateAgent({ name, state: agentState }) {
   if (!entry) return;
   entry.card.dataset.state = agentState;
   entry.stateLine.textContent = agentState;
+  if (agentState === "idle") entry.preview.textContent = "";
+}
+
+// Live text is not part of the saved feed. It shows the end of the reply as it streams.
+function updateLive({ agent, text }) {
+  const entry = cards.get(agent);
+  if (entry) entry.preview.textContent = text.length > 280 ? `…${text.slice(-280)}` : text;
 }
 
 function updateTurn(data) {

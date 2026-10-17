@@ -87,6 +87,6 @@ The tests use scripted replies and local stub servers, so they don't call any re
 
 ### Known limits
 
-- Streamed output: the model's reply appears when the call finishes, not word by word. Planned, not yet built.
+- Replies stream. The page shows the end of each agent's reply while it arrives. That live text is not saved, so after a reconnect it shows only what is streaming at that moment. The saved feed shows the full message once the turn ends.
+- The `openai_compatible` provider needs a server with tool calling. Chat-only servers fail. Streaming also asks for token usage with `stream_options`. A server that rejects that option will fail the request.
 - The fetch tool checks an address before connecting. A name whose address changes between the check and the connection could still reach a private address. Treat fetch as reading public pages, not as a hardened proxy.
-- The `openai_compatible` provider needs a server with tool calling. Chat-only servers fail.

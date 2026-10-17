@@ -195,6 +195,14 @@ summary { cursor: pointer; color: var(--muted); }
 }
 
 .card[data-state="thinking"] { box-shadow: 0 0 0 2px var(--accent); }
+.preview {
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 6em;
+  overflow: hidden;
+  margin: 4px 0;
+}
 .card-title { font-weight: 600; }
 .card-state { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
 .card[data-state="thinking"] .card-state { color: var(--accent); }

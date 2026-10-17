@@ -63,7 +63,7 @@ def _member_tools(spec, registry):
     return [tool for group in groups for tool in GROUPS[group]]
 
 
-def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None, save_state=None, tools=None):
+def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None, save_state=None, tools=None, on_live=None):
     """Returns (team, secrets). lookup_key(provider) gives a key from the vault, or None to fall back to the env var."""
     if not isinstance(config, dict):
         raise ConfigError("the team config must be a JSON object")
@@ -116,6 +116,7 @@ def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None, save
         stop_event=stop_event,
         save_state=save_state,
         extra_tools=tools,
+        on_live=on_live,
     )
     return team, secrets
 
@@ -145,6 +146,7 @@ def run_in_background(store, run_id, team, action, secrets):
         except Exception as error:  # a failed provider call ends this run, not the server
             store.add_event(run_id, "error", {"message": redact(str(error), secrets)})
             status = "failed"
+        store.clear_live(run_id)
         store.finish_run(run_id, status)
 
     thread = threading.Thread(target=work, daemon=True, name=f"run-{run_id[:8]}")

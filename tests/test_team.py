@@ -37,7 +37,7 @@ class ScriptedProvider:
         self.calls = []
         self.tools = []
 
-    def complete(self, model, system, messages, tools):
+    def complete(self, model, system, messages, tools, on_text=None):
         self.calls.append(list(messages))
         self.tools.append([tool["name"] for tool in tools])
         return self.replies.pop(0) if self.replies else reply(text="(no scripted reply left)")
@@ -212,7 +212,7 @@ class TeamTests(unittest.TestCase):
         class SlowProvider:
             name = "slow"
 
-            def complete(self, model, system, messages, tools):
+            def complete(self, model, system, messages, tools, on_text=None):
                 release.wait(5)
                 return reply(call("finish", answer="late"))
 
@@ -229,6 +229,22 @@ class TeamTests(unittest.TestCase):
 
         self.assertFalse(worker.is_alive())
         self.assertEqual(team.status, "stopped")
+
+    def test_live_text_is_reported_during_a_reply_and_cleared_after(self):
+        class Streaming:
+            name = "streaming"
+
+            def complete(self, model, system, messages, tools, on_text=None):
+                on_text("part")
+                on_text("partial reply")
+                return reply(call("finish", answer="ok"))
+
+        live = []
+        team = Team([Agent("lead", "plans", Streaming(), "m")], lead="lead", on_live=lambda name, text: live.append((name, text)))
+
+        self.assertEqual(team.run("goal"), "ok")
+        self.assertEqual(live[-1], ("lead", ""))
+        self.assertTrue(set(text for _, text in live) <= {"", "part", "partial reply"})
 
     def test_human_message_reaches_the_lead_during_the_run(self):
         lead = ScriptedProvider(reply(call("finish", answer="done")))
@@ -288,7 +304,7 @@ class _Handler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
         _Handler.seen.append({"path": self.path, "headers": self.headers, "body": body})
         status, payload, headers = _Handler.responses.pop(0)
-        raw = json.dumps(payload).encode()
+        raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("content-type", "application/json")
         for name, value in headers.items():
@@ -303,6 +319,17 @@ class _Handler(BaseHTTPRequestHandler):
 
 def respond(payload, status=200, headers=None):
     return (status, payload, headers or {})
+
+
+def events(*pairs):
+    """Build a server-sent event body from (event name, data) pairs. A name of None means no event line."""
+    lines = []
+    for name, data in pairs:
+        if name:
+            lines.append(f"event: {name}")
+        lines.append(f"data: {data if isinstance(data, str) else json.dumps(data)}")
+        lines.append("")
+    return "\n".join(lines).encode() + b"\n"
 
 
 class ProviderHttpTests(unittest.TestCase):
@@ -466,6 +493,72 @@ class ProviderHttpTests(unittest.TestCase):
             provider.complete("m", "s", [{"role": "user", "text": "hi"}], [])
         self.assertEqual(len(_Handler.seen), 1)
         self.assertEqual(self.sleeps, [])
+
+    def test_anthropic_stream_builds_the_reply_and_reports_text_as_it_grows(self):
+        _Handler.responses = [
+            respond(
+                events(
+                    ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
+                    ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+                    ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Working"}}),
+                    ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": " on it"}}),
+                    ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                    ("content_block_start", {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "send_message", "input": {}}}),
+                    ("content_block_delta", {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": '{"to": "writer",'}}),
+                    ("content_block_delta", {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": ' "message": "hi"}'}}),
+                    ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 7}}),
+                    ("message_stop", {"type": "message_stop"}),
+                )
+            )
+        ]
+        seen = []
+        provider = AnthropicProvider("claude", "secret", base_url=self.base)
+
+        reply_ = provider.complete("m", "s", [{"role": "user", "text": "hi"}], [], on_text=seen.append)
+
+        self.assertEqual(reply_.text, "Working on it")
+        self.assertEqual(reply_.tool_calls[0].arguments, {"to": "writer", "message": "hi"})
+        self.assertEqual(reply_.tokens, 17)
+        self.assertEqual(seen, ["Working", "Working on it"])
+        self.assertTrue(_Handler.seen[0]["body"]["stream"])
+
+    def test_openai_stream_joins_split_tool_calls_and_reads_usage(self):
+        chunks = [
+            {"choices": [{"delta": {"content": "Let me "}}]},
+            {"choices": [{"delta": {"content": "check."}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "send_message", "arguments": '{"to": "wri'}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": 'ter", "message": "go"}'}}]}}]},
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+            {"choices": [], "usage": {"total_tokens": 42}},
+        ]
+        _Handler.responses = [respond(events(*[(None, chunk) for chunk in chunks], (None, "[DONE]")))]
+        seen = []
+
+        reply_ = self.openai().complete("m", "s", [{"role": "user", "text": "hi"}], [], on_text=seen.append)
+
+        self.assertEqual(reply_.text, "Let me check.")
+        self.assertEqual(reply_.tool_calls[0].arguments, {"to": "writer", "message": "go"})
+        self.assertEqual(reply_.tokens, 42)
+        self.assertEqual(seen, ["Let me ", "Let me check."])
+
+    def test_a_stream_that_fails_before_starting_is_retried(self):
+        body = events((None, {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}), (None, "[DONE]"))
+        _Handler.responses = [respond({"error": "busy"}, status=503), respond(body)]
+        provider = self.openai()
+        provider.sleep = self.sleeps.append
+
+        reply_ = provider.complete("m", "s", [{"role": "user", "text": "hi"}], [], on_text=lambda text: None)
+
+        self.assertEqual(reply_.text, "ok")
+        self.assertEqual(len(_Handler.seen), 2)
+        self.assertEqual(len(self.sleeps), 1)
+
+    def test_an_error_event_in_a_stream_is_reported(self):
+        _Handler.responses = [respond(events(("error", {"type": "error", "error": {"message": "overloaded here"}})))]
+        provider = AnthropicProvider("claude", "secret", base_url=self.base)
+
+        with self.assertRaisesRegex(ProviderError, "overloaded here"):
+            provider.complete("m", "s", [{"role": "user", "text": "hi"}], [], on_text=lambda text: None)
 
     def test_missing_key_is_a_clear_error(self):
         with self.assertRaisesRegex(ProviderError, "no API key configured"):

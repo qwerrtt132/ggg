@@ -278,6 +278,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             after = 0
         self._send(200, None, "text/event-stream; charset=utf-8")
+        sent_live = {}  # agent -> live text last sent on this connection
         try:
             while True:
                 version = store.current_version()
@@ -286,6 +287,13 @@ class Handler(BaseHTTPRequestHandler):
                 for seq, kind, data in rows:
                     self.wfile.write(f"id: {seq}\nevent: {kind}\ndata: {json.dumps(data)}\n\n".encode())
                     after = seq
+                current = store.live_text(run_id)
+                for agent in set(current) | set(sent_live):
+                    text = current.get(agent, "")
+                    if sent_live.get(agent) != text:
+                        # Live text is not saved: a reconnect only sees what is streaming at that moment.
+                        self.wfile.write(f"event: live\ndata: {json.dumps({'agent': agent, 'text': text})}\n\n".encode())
+                        sent_live[agent] = text
                 self.wfile.flush()
                 if not rows:
                     if run["status"] in FINISHED:
@@ -352,6 +360,7 @@ def _build_for_run(app, run_id, config, control):
         stop_event=control.stop,
         save_state=lambda snapshot: app.store.save_state(run_id, snapshot),
         tools=tools,
+        on_live=lambda agent, text: app.store.set_live(run_id, agent, text),
     )
 
 

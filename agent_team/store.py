@@ -40,6 +40,7 @@ class Store:
         self.lock = threading.Lock()
         self.changed = threading.Condition(self.lock)
         self.version = 0
+        self.live = {}  # run id -> {agent: reply text so far}. In memory only: live text is never stored.
         self.db = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
@@ -59,6 +60,20 @@ class Store:
                 "INSERT INTO runs (id, goal, status, created_at, config) VALUES (?, ?, 'running', ?, ?)",
                 (run_id, goal, time.time(), json.dumps(config) if config is not None else None),
             )
+
+    def set_live(self, run_id, agent, text):
+        with self.lock:
+            self.live.setdefault(run_id, {})[agent] = text
+            self._changed()
+
+    def live_text(self, run_id):
+        with self.lock:
+            return dict(self.live.get(run_id, {}))
+
+    def clear_live(self, run_id):
+        with self.lock:
+            if self.live.pop(run_id, None):
+                self._changed()
 
     def save_preset(self, name, config):
         with self.lock:

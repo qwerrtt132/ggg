@@ -1,6 +1,20 @@
 # Agent team: implementation plan
 
-Status: phase 1 and phase 2 done. Phase 3 in progress. Owner: the repo's maintainer.
+Status: phases 1 and 2 done. Phase 3 done except the browser checks for the new run features, which are listed as open below. 72 tests pass. Owner: the repo's maintainer.
+
+Phase 3 as built:
+- Resumable runs: histories and counters are saved after each turn. A message after a restart rebuilds the team from the saved config and state.
+- Files and fetch tools: opt-in per member, with the workspace and address rules from the plan.
+- Role templates and team presets. Presets and runs refuse key fields.
+- Transcript export as Markdown and JSON.
+- Packaging: `agent-team` command, with the default team config shipped in the package.
+- Streaming for both adapters. Live text shows on each agent's card, is never saved, and is cleared when the turn ends.
+
+Not built, on purpose: running agent-written code (see "Deliberately not built").
+
+Open:
+- Browser checks for a restarted run being continued from the page, and for the live preview. The server-level tests cover both, but not the page.
+- The live preview is best-effort. Throttled to about 7 updates per second per agent.
 
 ## Phase 3: capability and durability
 
@@ -36,7 +50,7 @@ Phase 2 scope as built:
 - Feed only auto-scrolls when you are at the bottom. Live-region announcements. Connection state shown in the run status. Ctrl+Enter starts a run.
 - Concurrency cap returns HTTP 429 with a clear message.
 
-Deferred to phase 3: streamed model output (needs streaming parsers for both providers), resumable run state across restarts.
+Deferred to phase 3 and done there: streamed model output, resumable run state across restarts.
 
 Phase 1 notes from implementation:
 - The stall check compares short turns exactly and only applies similarity to turns of 80 characters or more. Short messages like "try 1" and "try 2" are different turns.

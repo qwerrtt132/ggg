@@ -18,10 +18,30 @@ from agent_team.store import Store
 
 
 class StubProvider(BaseHTTPRequestHandler):
-    """Answers every chat completion by calling the finish tool, like a tool-calling OpenAI-compatible server."""
+    """Answers every chat completion by calling the finish tool, like a tool-calling OpenAI-compatible server.
+
+    Streamed requests get the same answer as server-sent events, split across chunks, with some text first.
+    """
+
+    def stream_finish(self):
+        chunks = [
+            {"choices": [{"delta": {"content": "thinking..."}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "finish", "arguments": '{"answer": "hello '}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": 'from stub"}'}}]}}]},
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+            {"choices": [], "usage": {"total_tokens": 3}},
+        ]
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.end_headers()
+        for chunk in chunks:
+            self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+        self.wfile.write(b"data: [DONE]\n\n")
 
     def do_POST(self):
-        self.rfile.read(int(self.headers["content-length"]))
+        body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+        if body.get("stream"):
+            return self.stream_finish()
         finish = {"id": "call_1", "type": "function", "function": {"name": "finish", "arguments": json.dumps({"answer": "hello from stub"})}}
         payload = json.dumps({"choices": [{"message": {"content": None, "tool_calls": [finish]}, "finish_reason": "tool_calls"}]}).encode()
         self.send_response(200)
@@ -154,6 +174,7 @@ class ServerTests(unittest.TestCase):
         data = self.root / "data"
         store = Store(data / "agent_team.db")
         self.addCleanup(store.db.close)
+        self.store = store
         vault = KeyVault(data, master_key_path=self.root / "master.key")
         self.server = Server(0, App(store, vault, self.TOKEN))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -265,6 +286,23 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("API keys panel", json.loads(body)["error"])
         self.assertNotIn("sk-pasted-in-config", body)
+
+    def test_live_text_reaches_the_stream_but_is_not_stored(self):
+        self.store.create_run("live-run", "goal")
+        self.store.set_live("live-run", "lead", "thinking out loud")
+        request = urllib.request.Request(self.base + "/api/runs/live-run/events", headers={"X-Session-Token": self.TOKEN})
+        response = urllib.request.urlopen(request, timeout=10)
+        seen = []
+        for raw in response:
+            line = raw.decode().strip()
+            seen.append(line)
+            if "thinking out loud" in line:
+                break
+        self.store.finish_run("live-run", "done")
+        response.close()
+
+        self.assertIn("event: live", seen)
+        self.assertEqual([kind for _, kind, _ in self.store.events_after("live-run", 0)], ["status"])
 
     def test_key_test_checks_a_key_and_model_without_echoing_it(self):
         self.request("POST", "/api/keys", {"provider": "stub", "key": "sk-check-5555"})

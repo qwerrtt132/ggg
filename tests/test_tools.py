@@ -112,7 +112,7 @@ class TeamToolTests(unittest.TestCase):
                 self.replies = list(replies)
                 self.tool_names = []
 
-            def complete(self, model, system, messages, tools):
+            def complete(self, model, system, messages, tools, on_text=None):
                 self.tool_names.append([tool["name"] for tool in tools])
                 return self.replies.pop(0)
 

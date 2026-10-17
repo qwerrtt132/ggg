@@ -15,6 +15,7 @@ STALL_MIN_LENGTH = 80  # shorter turns are compared exactly, so "try 1" and "try
 SILENT_TURNS_LIMIT = 2  # turns without any tool call before the run gives up
 HISTORY_WINDOW = 16  # recent items sent to the model; older ones are dropped
 POLL_SECONDS = 0.05
+LIVE_INTERVAL_SECONDS = 0.15  # at most one live-text update per agent this often
 
 SEND_MESSAGE = {
     "name": "send_message",
@@ -121,6 +122,7 @@ class Team:
         clock=time.monotonic,
         save_state=None,
         extra_tools=None,
+        on_live=None,
     ):
         names = [agent.name for agent in agents]
         if len(set(names)) != len(names):
@@ -141,6 +143,8 @@ class Team:
         self.clock = clock
         self.save_state = save_state  # called with a snapshot after every turn, so a restart can resume
         self.extra_tools = extra_tools or {}  # name -> (definition, handler), see tools.build_tools
+        self.on_live = on_live  # called with (agent, text so far) while a reply streams, and (agent, "") when it ends
+        self._last_live = {}
         self.status = None
         self.tokens_used = 0
         self.goal = ""
@@ -202,6 +206,7 @@ class Team:
             self.inboxes[name] = []
             self.emit("agent", name=name, state="thinking")
             reply = self._call(agent)
+            self._live(name, "", force=True)
             if reply is None:
                 return self._finish("stopped")
             turns += 1
@@ -241,6 +246,16 @@ class Team:
         self.status = status
         return answer
 
+    def _live(self, name, text, force=False):
+        """Report a reply's text as it streams. Updates are throttled, except the final clearing one."""
+        if self.on_live is None:
+            return
+        now = time.monotonic()
+        if not force and text and now - self._last_live.get(name, 0.0) < LIVE_INTERVAL_SECONDS:
+            return
+        self._last_live[name] = now
+        self.on_live(name, text)
+
     def snapshot(self):
         """Everything needed to continue this team later: each agent's history and the token count."""
         return {
@@ -269,6 +284,7 @@ class Team:
                     self._system_prompt(agent),
                     context_view(agent.history),
                     self._tools_for(agent.name),
+                    on_text=lambda text: self._live(agent.name, text),
                 )
             except Exception as error:
                 outcome["error"] = error
