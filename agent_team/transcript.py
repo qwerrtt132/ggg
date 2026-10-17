@@ -30,6 +30,10 @@ def to_markdown(run, events):
             lines += ["## Final answer", "", data["answer"], ""]
         elif kind == "error":
             lines += [f"**Error:** {data['message']}", ""]
+        elif kind == "rewind":
+            lines += [f"*Rewound to turn {data['to_turn']}. The turns after it were dropped.*", ""]
+        elif kind == "branched":
+            lines += [f"*Branched from run {data['from_run'][:8]} at turn {data['turn']}.*", ""]
         elif kind == "status" and data["status"] != "running":
             lines += [f"*Run ended: {data['status']}*", ""]
     return "\n".join(lines).rstrip() + "\n"

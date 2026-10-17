@@ -150,6 +150,8 @@ class Team:
         self.on_live = on_live  # called with (agent, text so far) while a reply streams, and (agent, "") when it ends
         self._last_live = {}
         self._call_id = 0  # identifies the current model call, so an abandoned call's late text is ignored
+        self.turn_no = 0  # turns taken so far, across runs and continuations; checkpoints are keyed by it
+        self.last_agent = None
         self.status = None
         self.tokens_used = 0
         self.goal = ""
@@ -158,9 +160,8 @@ class Team:
         self.silent_turns = {}
         self.pending_answer = None
 
-    def run(self, goal):
-        """Start work on a goal. Returns the answer if the team finished, otherwise None."""
-        self.goal = goal
+    def announce(self):
+        """Tell the event log who is on the team. The page uses this to draw the agent cards."""
         self.emit(
             "roster",
             lead=self.lead,
@@ -171,13 +172,21 @@ class Team:
                 for agent in self.agents.values()
             ],
         )
+
+    def run(self, goal):
+        """Start work on a goal. Returns the answer if the team finished, otherwise None."""
+        self.goal = goal
+        self.announce()
         self._reset()
         self._enqueue(self.lead, f"From the user:\n{goal}")
         return self._loop()
 
     def continue_run(self, text):
-        """Continue after the run ended. Every agent keeps its history, so the team picks up where it left off."""
-        self._reset()
+        """Continue after the run ended. Histories and waiting messages are kept, so the team picks up where it left."""
+        self.status = "running"
+        self.silent_turns = {name: 0 for name in self.agents}
+        for name in self.agents:
+            self.inboxes.setdefault(name, [])
         self._enqueue(self.lead, f"From the user, as a follow-up:\n{text}")
         return self._loop()
 
@@ -220,9 +229,18 @@ class Team:
             if reply is None:
                 return self._finish("timeout" if timed_out else "stopped")
             turns += 1
+            self.turn_no += 1
+            self.last_agent = name
             self.tokens_used += reply.tokens
             self.emit("agent", name=name, state="idle")
-            self.emit("turn", agent=name, tokens=reply.tokens, total_tokens=self.tokens_used, truncated=reply.truncated)
+            self.emit(
+                "turn",
+                agent=name,
+                turn=self.turn_no,
+                tokens=reply.tokens,
+                total_tokens=self.tokens_used,
+                truncated=reply.truncated,
+            )
             agent.history.append({"role": "assistant", "text": reply.text, "tool_calls": reply.tool_calls})
 
             results, decision, failed = self._handle_calls(name, reply.tool_calls)
@@ -267,9 +285,15 @@ class Team:
         self.on_live(name, text)
 
     def snapshot(self):
-        """Everything needed to continue this team later: each agent's history and the token count."""
+        """Everything needed to continue this team from this exact point: histories, waiting messages, counters."""
         return {
+            "turn": self.turn_no,
+            "agent": self.last_agent,
             "agents": {name: history_to_json(agent.history) for name, agent in self.agents.items()},
+            "inboxes": {name: list(items) for name, items in self.inboxes.items()},
+            "ready": list(self.ready),
+            "silent_turns": dict(self.silent_turns),
+            "pending_answer": self.pending_answer,
             "tokens_used": self.tokens_used,
         }
 
@@ -277,6 +301,12 @@ class Team:
         for name, items in snapshot.get("agents", {}).items():
             if name in self.agents:
                 self.agents[name].history = history_from_json(items)
+        self.turn_no = snapshot.get("turn", 0)
+        self.last_agent = snapshot.get("agent")
+        self.inboxes = {name: list(snapshot.get("inboxes", {}).get(name, [])) for name in self.agents}
+        self.ready = deque(name for name in snapshot.get("ready", []) if name in self.agents)
+        self.silent_turns = {name: snapshot.get("silent_turns", {}).get(name, 0) for name in self.agents}
+        self.pending_answer = snapshot.get("pending_answer")
         self.tokens_used = snapshot.get("tokens_used", 0)
 
     def _checkpoint(self):

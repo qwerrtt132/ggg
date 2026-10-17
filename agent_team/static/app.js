@@ -3,7 +3,7 @@ const token = new URLSearchParams(location.search).get("token") || "";
 history.replaceState(null, "", "/");
 
 const FINISHED = new Set(["done", "idle", "max_turns", "timeout", "token_budget", "stalled", "stopped", "failed", "interrupted", "no_progress"]);
-const EVENT_KINDS = ["roster", "agent", "message", "turn", "human", "final", "error", "status"];
+const EVENT_KINDS = ["roster", "agent", "message", "turn", "human", "final", "error", "status", "rewind", "branched"];
 const NAME_RULE = /^[a-z][a-z0-9_-]{0,31}$/;
 const DRAFT_KEY = "agent-team-draft";
 const TOOL_GROUPS = [
@@ -25,6 +25,8 @@ const state = {
   stream: null,
   maxTokens: null,
   tokensUsed: 0,
+  selectedTurn: null,
+  rewindArmed: false,
 };
 let cards = new Map();
 
@@ -325,6 +327,7 @@ async function loadRuns() {
 }
 
 function openRun(id, goal, status) {
+  const sameRun = state.runId === id;
   if (state.stream) state.stream.close();
   $("export-md").href = `/api/runs/${id}/export?format=md&token=${encodeURIComponent(token)}`;
   $("export-json").href = `/api/runs/${id}/export?format=json&token=${encodeURIComponent(token)}`;
@@ -334,6 +337,14 @@ function openRun(id, goal, status) {
   state.finished = FINISHED.has(status);
   state.connection = "connecting";
   state.tokensUsed = 0;
+  if (!sameRun) {
+    // A different run: forget the selected turn. Reopening the same run (after a rewind, say) keeps it.
+    state.selectedTurn = null;
+    state.rewindArmed = false;
+    $("time-actions").hidden = true;
+    $("timeline").replaceChildren();
+  }
+  scheduleTimeline();
   $("run-title").textContent = goal;
   $("feed").replaceChildren();
   $("cards").replaceChildren();
@@ -380,13 +391,95 @@ function updateControls() {
   $("human-text").placeholder = state.finished
     ? "This run has finished. Send a message to continue it with the same agents."
     : "Message the lead during the run";
+  $("rewind").disabled = !state.finished || state.selectedTurn === null;
+  $("branch").disabled = state.selectedTurn === null;
 }
+
+// ---------- turns: timeline, rewind, and branch ----------
+
+let timelineTimer = null;
+
+function scheduleTimeline() {
+  clearTimeout(timelineTimer);
+  timelineTimer = setTimeout(() => attempt(loadTimeline), 300);
+}
+
+async function loadTimeline() {
+  if (!state.runId) return;
+  const runId = state.runId;
+  const { checkpoints } = await api("GET", `/runs/${runId}/checkpoints`);
+  if (state.runId !== runId) return;
+  const list = $("timeline");
+  list.replaceChildren();
+  if (checkpoints.length === 0) list.append(el("li", "No turns yet.", "muted"));
+  for (const point of checkpoints) {
+    const item = el("li");
+    const button = el("button", `Turn ${point.turn} · ${point.agent || "?"}`, "turn-dot secondary");
+    button.setAttribute("aria-pressed", String(state.selectedTurn === point.turn));
+    button.addEventListener("click", () => selectTurn(point.turn, point.agent, point.tokens_used));
+    item.append(button);
+    list.append(item);
+  }
+  updateControls();
+}
+
+function selectTurn(turn, agent, tokens) {
+  state.selectedTurn = turn;
+  state.rewindArmed = false;
+  $("rewind").textContent = "Rewind here";
+  $("time-actions").hidden = false;
+  $("time-selected").textContent = `Turn ${turn} · ${agent || "?"} · ${(tokens || 0).toLocaleString()} tokens used up to here`;
+  $("time-note").textContent = "";
+  for (const button of $("timeline").querySelectorAll("button")) {
+    button.setAttribute("aria-pressed", String(button.textContent.startsWith(`Turn ${turn} `)));
+  }
+  updateControls();
+}
+
+$("rewind").addEventListener("click", () => {
+  const message = $("time-message").value.trim();
+  if (!message) {
+    $("time-note").textContent = "Write the message to continue with first.";
+    return;
+  }
+  if (!state.rewindArmed) {
+    state.rewindArmed = true;
+    $("rewind").textContent = `Confirm: rewind to turn ${state.selectedTurn}`;
+    $("time-note").textContent = "Turns after this one are dropped from the checkpoints. Their events stay in the history.";
+    return;
+  }
+  attempt(async () => {
+    await api("POST", `/runs/${state.runId}/rewind`, { turn: state.selectedTurn, message });
+    state.rewindArmed = false;
+    $("rewind").textContent = "Rewind here";
+    $("time-message").value = "";
+    openRun(state.runId, state.goal, "running");
+  });
+});
+
+$("branch").addEventListener("click", () => {
+  const message = $("time-message").value.trim();
+  if (!message) {
+    $("time-note").textContent = "Write the message to continue with first.";
+    return;
+  }
+  attempt(async () => {
+    const { id } = await api("POST", `/runs/${state.runId}/branch`, { turn: state.selectedTurn, message });
+    $("time-message").value = "";
+    await loadRuns();
+    openRun(id, state.goal, "running");
+    $("time-note").textContent = "Started a branch on the right. The original run is unchanged.";
+  });
+});
 
 function render(kind, data) {
   if (kind === "roster") return renderRoster(data);
   if (kind === "agent") return updateAgent(data);
   if (kind === "status") return finishRun(data.status);
-  if (kind === "turn") return updateTurn(data);
+  if (kind === "turn") {
+    scheduleTimeline();
+    return updateTurn(data);
+  }
 
   const feed = $("feed");
   const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
@@ -400,6 +493,10 @@ function render(kind, data) {
     item.append(el("div", "Final answer", "who"), el("div", data.answer, "text"));
   } else if (kind === "error") {
     item.append(el("div", data.message, "error"));
+  } else if (kind === "rewind") {
+    item.append(el("div", `Rewound to turn ${data.to_turn}. Later turns were dropped from the checkpoints.`, "who"));
+  } else if (kind === "branched") {
+    item.append(el("div", `Branched from another run at turn ${data.turn}.`, "who"));
   }
   feed.append(item);
   if (nearBottom || kind === "human") item.scrollIntoView({ block: "end" });
@@ -411,6 +508,7 @@ function finishRun(status) {
   refreshRunStatus();
   updateControls();
   attempt(loadRuns);
+  scheduleTimeline();
 }
 
 function renderRoster(roster) {

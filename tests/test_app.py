@@ -134,6 +134,135 @@ def decode(raw):
         return text
 
 
+class CheckpointStoreTests(unittest.TestCase):
+    def test_checkpoints_are_listed_pruned_and_discarded(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        store = Store(Path(directory.name) / "runs.db", keep_checkpoints=3)
+        self.addCleanup(store.db.close)
+        store.create_run("r", "goal")
+        for turn in range(1, 6):
+            store.save_state("r", {"turn": turn, "agent": "lead", "tokens_used": turn, "agents": {}})
+
+        self.assertEqual([row["turn"] for row in store.list_checkpoints("r")], [3, 4, 5])
+        self.assertEqual(store.get_checkpoint("r", 4)["turn"], 4)
+        store.discard_checkpoints_after("r", 4)
+        self.assertEqual([row["turn"] for row in store.list_checkpoints("r")], [3, 4])
+
+
+class TwoAgentStub(BaseHTTPRequestHandler):
+    """A lead and a writer. The lead asks the writer for a draft, then finishes once the reply arrives."""
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+        system, messages = body["messages"][0]["content"], body["messages"][1:]
+        if "You are 'lead'" in system:
+            name, arguments = (
+                ("send_message", {"to": "writer", "message": "draft please"})
+                if len(messages) <= 1
+                else ("finish", {"answer": "final answer"})
+            )
+        else:
+            name, arguments = "send_message", {"to": "lead", "message": "here is the draft"}
+        call = {"index": 0, "id": "call_stub", "function": {"name": name, "arguments": json.dumps(arguments)}}
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.end_headers()
+        for chunk in ({"choices": [{"delta": {"tool_calls": [call]}}]}, {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}):
+            self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+        self.wfile.write(b"data: [DONE]\n\n")
+
+    def log_message(self, *args):
+        pass
+
+
+class CheckpointTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        env = mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"})
+        env.start()
+        self.addCleanup(env.stop)
+        stub = start_http_server(("127.0.0.1", 0), TwoAgentStub)
+        self.addCleanup(stub.server_close)
+        self.addCleanup(stub.shutdown)
+        self.stub_base = f"http://127.0.0.1:{stub.server_port}"
+        self.store = Store(self.root / "data" / "agent_team.db")
+        self.addCleanup(self.store.db.close)
+        vault = KeyVault(self.root / "data", master_key_path=self.root / "master.key")
+        vault.set("stub", "sk-checkpoint-2222")
+        self.workspaces = self.root / "workspaces"
+        self.server = Server(0, App(self.store, vault, "tok", workspaces=self.workspaces))
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+
+    def call(self, method, path, body=None):
+        request = urllib.request.Request(
+            self.base + path,
+            data=json.dumps(body).encode() if body is not None else None,
+            method=method,
+            headers={"X-Session-Token": "tok", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status, decode(response.read())
+        except urllib.error.HTTPError as error:
+            return error.code, decode(error.read())
+
+    def finished_run(self):
+        config = {
+            "providers": {"stub": {"type": "openai_compatible", "base_url": self.stub_base}},
+            "lead": {"name": "lead", "provider": "stub", "model": "m", "role": "plan"},
+            "teammates": [{"name": "writer", "provider": "stub", "model": "m", "role": "write"}],
+        }
+        _, body = self.call("POST", "/api/runs", {"config": config, "goal": "write a note"})
+        self.call("GET", f"/api/runs/{body['id']}/events")  # returns once the run has finished
+        return body["id"]
+
+    def test_each_turn_is_a_checkpoint(self):
+        run_id = self.finished_run()
+        _, checkpoints = self.call("GET", f"/api/runs/{run_id}/checkpoints")
+
+        self.assertEqual([row["turn"] for row in checkpoints["checkpoints"]], [1, 2, 3])
+        self.assertEqual(checkpoints["checkpoints"][0]["agent"], "lead")
+
+    def test_rewind_restores_a_turn_and_continues(self):
+        run_id = self.finished_run()
+        status, body = self.call("POST", f"/api/runs/{run_id}/rewind", {"turn": 1, "message": "try again"})
+
+        self.assertEqual((status, body["resumed"]), (202, True))
+        _, events = self.call("GET", f"/api/runs/{run_id}/events")
+        self.assertIn("event: rewind", events)
+        self.assertEqual(events.count("event: final"), 2)
+
+    def test_rewind_to_an_unknown_turn_is_refused(self):
+        run_id = self.finished_run()
+        status, _ = self.call("POST", f"/api/runs/{run_id}/rewind", {"turn": 99, "message": "x"})
+        self.assertEqual(status, 404)
+
+    def test_branch_leaves_the_parent_unchanged_and_copies_its_workspace(self):
+        run_id = self.finished_run()
+        (self.workspaces / run_id).mkdir(parents=True, exist_ok=True)
+        (self.workspaces / run_id / "note.txt").write_text("draft")
+        _, parent_before = self.call("GET", f"/api/runs/{run_id}/events")
+
+        status, body = self.call("POST", f"/api/runs/{run_id}/branch", {"turn": 1, "message": "another way"})
+        self.assertEqual(status, 201)
+        branch_id = body["id"]
+        _, branch_events = self.call("GET", f"/api/runs/{branch_id}/events")
+
+        self.assertIn("event: roster", branch_events)
+        self.assertIn("event: branched", branch_events)
+        self.assertEqual(branch_events.count("event: final"), 1)
+        self.assertEqual((self.workspaces / branch_id / "note.txt").read_text(), "draft")
+        self.assertEqual(self.store.get_run_record(branch_id)["parent_id"], run_id)
+        _, parent_after = self.call("GET", f"/api/runs/{run_id}/events")
+        self.assertEqual(parent_after, parent_before)
+
+
 class ConcurrencyTests(unittest.TestCase):
     """Each test holds a run open on a gate, so races between requests happen every time."""
 

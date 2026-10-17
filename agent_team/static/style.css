@@ -250,3 +250,11 @@ summary { cursor: pointer; color: var(--muted); }
 .inline-form { display: flex; flex-wrap: wrap; gap: 8px; }
 .inline-form input { flex: 1; min-width: 200px; width: auto; }
 .inline-form button { margin-top: 0; }
+
+.timeline-section { margin: 8px 0 12px; }
+.timeline { list-style: none; padding: 0; margin: 0 0 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+.timeline li { margin: 0; }
+.turn-dot { margin-top: 0; padding: 4px 10px; font-size: 0.85rem; }
+.turn-dot[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.time-actions { border: 1px dashed var(--line); border-radius: 6px; padding: 10px; margin-bottom: 12px; }
+.time-actions label { margin-bottom: 6px; }

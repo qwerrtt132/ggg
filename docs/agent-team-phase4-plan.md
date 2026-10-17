@@ -1,6 +1,6 @@
 # Agent team: phase 4 plan
 
-Status: M1 done (commit 1ba2693, 83 tests passing). M2 to M6 planned, not started. Based on [the research report](../reports/Agent%20team%20tools%20research.md) and the [review of phases 1 to 3](../reports/Agent%20team%20tools%20research.md#6-what-this-means-for-us). Owner: the repo's maintainer.
+Status: M1 done (commit 1ba2693). M2 done: a checkpoint per turn, rewind, and branch, with a timeline in the page. 92 tests passing. Rewind does not undo workspace files; that waits for M3. M3 to M6 planned, not started. Based on [the research report](../reports/Agent%20team%20tools%20research.md) and the [review of phases 1 to 3](../reports/Agent%20team%20tools%20research.md#6-what-this-means-for-us). Owner: the repo's maintainer.
 
 Phase 4 does two things. It fixes the issues from the review, and it adds the four capabilities the research showed matter most for running agents in a way people can operate: per-step snapshots with rewind, approvals with patch-level review, a trace view, and re-planning on stall.
 

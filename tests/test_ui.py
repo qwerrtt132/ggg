@@ -188,6 +188,34 @@ class UiTests(unittest.TestCase):
         expect(page.locator("#feed .text", has_text="hello from stub")).to_have_count(2)
         self.assertEqual(self.errors, [])
 
+    def test_the_timeline_rewinds_and_branches_from_the_page(self):
+        page = self.open_page()
+        page.click("#keys-details summary")
+        page.fill("#key-provider", "stub")
+        page.fill("#key-value", "sk-timeline-3333")
+        page.click("#keys-details button[type=submit]")
+        expect(page.locator("#notice")).to_have_text("Key saved.")
+        page.fill("#goal", "say hi")
+        page.click("#start")
+        expect(page.locator("#run-status")).to_contain_text("Status: done")
+
+        page.click("#timeline button:has-text('Turn 1')")
+        expect(page.locator("#time-actions")).to_be_visible()
+        expect(page.locator("#rewind")).to_be_enabled()
+
+        page.fill("#time-message", "one more time")
+        page.click("#rewind")
+        expect(page.locator("#rewind")).to_contain_text("Confirm")
+        page.click("#rewind")
+        expect(page.locator("#feed")).to_contain_text("Rewound to turn 1")
+        expect(page.locator("#feed .text", has_text="hello from stub")).to_have_count(2)
+
+        page.fill("#time-message", "a different path")
+        page.click("#branch")
+        expect(page.locator("#time-note")).to_contain_text("Started a branch")
+        expect(page.locator("#feed")).to_contain_text("Branched from another run at turn 1")
+        self.assertEqual(self.errors, [])
+
     def test_missing_key_blocks_start_with_a_clear_message(self):
         page = self.open_page(provider="nokey")
         page.fill("#goal", "say hi")

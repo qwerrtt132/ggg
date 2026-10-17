@@ -25,6 +25,15 @@ CREATE TABLE IF NOT EXISTS events (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_by_run ON events (run_id, seq);
+CREATE TABLE IF NOT EXISTS checkpoints (
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    turn INTEGER NOT NULL,
+    agent TEXT,
+    tokens_used INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    snapshot TEXT NOT NULL,
+    PRIMARY KEY (run_id, turn)
+);
 CREATE TABLE IF NOT EXISTS presets (
     name TEXT PRIMARY KEY,
     config TEXT NOT NULL,
@@ -34,8 +43,9 @@ CREATE TABLE IF NOT EXISTS presets (
 
 
 class Store:
-    def __init__(self, path):
+    def __init__(self, path, keep_checkpoints=50):
         path = Path(path)
+        self.keep_checkpoints = keep_checkpoints  # per run; older checkpoints are dropped
         path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self.changed = threading.Condition(self.lock)
@@ -50,15 +60,16 @@ class Store:
     def _ensure_columns(self):
         """Databases from earlier versions lack the config and state columns. Add them in place."""
         present = {row[1] for row in self.db.execute("PRAGMA table_info(runs)")}
-        for column in ("config", "state"):
+        for column, kind in (("config", "TEXT"), ("state", "TEXT"), ("parent_id", "TEXT"), ("parent_turn", "INTEGER")):
             if column not in present:
-                self.db.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
+                self.db.execute(f"ALTER TABLE runs ADD COLUMN {column} {kind}")
 
-    def create_run(self, run_id, goal, config=None):
+    def create_run(self, run_id, goal, config=None, parent_id=None, parent_turn=None):
         with self.lock:
             self.db.execute(
-                "INSERT INTO runs (id, goal, status, created_at, config) VALUES (?, ?, 'running', ?, ?)",
-                (run_id, goal, time.time(), json.dumps(config) if config is not None else None),
+                "INSERT INTO runs (id, goal, status, created_at, config, parent_id, parent_turn) "
+                "VALUES (?, ?, 'running', ?, ?, ?, ?)",
+                (run_id, goal, time.time(), json.dumps(config) if config is not None else None, parent_id, parent_turn),
             )
 
     def set_live(self, run_id, agent, text):
@@ -106,8 +117,55 @@ class Store:
         return [{"kind": kind, "data": json.loads(data), "created_at": created_at} for kind, data, created_at in rows]
 
     def save_state(self, run_id, snapshot):
+        """Save the latest state and a checkpoint for its turn, then drop the oldest checkpoints beyond the limit."""
         with self.lock:
-            self.db.execute("UPDATE runs SET state = ? WHERE id = ?", (json.dumps(snapshot), run_id))
+            self.db.execute("BEGIN")
+            try:
+                self.db.execute("UPDATE runs SET state = ? WHERE id = ?", (json.dumps(snapshot), run_id))
+                if "turn" in snapshot:
+                    self.db.execute(
+                        "INSERT OR REPLACE INTO checkpoints (run_id, turn, agent, tokens_used, created_at, snapshot) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            run_id,
+                            snapshot["turn"],
+                            snapshot.get("agent"),
+                            snapshot.get("tokens_used", 0),
+                            time.time(),
+                            json.dumps(snapshot),
+                        ),
+                    )
+                    self.db.execute(
+                        "DELETE FROM checkpoints WHERE run_id = ? AND turn <= ?",
+                        (run_id, snapshot["turn"] - self.keep_checkpoints),
+                    )
+                self.db.execute("COMMIT")
+            except Exception:
+                self.db.execute("ROLLBACK")
+                raise
+
+    def list_checkpoints(self, run_id):
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT turn, agent, tokens_used, created_at FROM checkpoints WHERE run_id = ? ORDER BY turn",
+                (run_id,),
+            ).fetchall()
+        return [
+            {"turn": turn, "agent": agent, "tokens_used": tokens, "created_at": created}
+            for turn, agent, tokens, created in rows
+        ]
+
+    def get_checkpoint(self, run_id, turn):
+        with self.lock:
+            row = self.db.execute(
+                "SELECT snapshot FROM checkpoints WHERE run_id = ? AND turn = ?", (run_id, turn)
+            ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def discard_checkpoints_after(self, run_id, turn):
+        """A rewind makes the later turns obsolete. Their events stay in the log; their checkpoints go."""
+        with self.lock:
+            self.db.execute("DELETE FROM checkpoints WHERE run_id = ? AND turn > ?", (run_id, turn))
 
     def get_run_record(self, run_id):
         """The run plus its saved config and state, for rebuilding the team after a restart."""
@@ -119,6 +177,10 @@ class Store:
         if row is None:
             return None
         record = dict(zip(RUN_COLUMNS + ("config", "state"), row))
+        with self.lock:
+            record["parent_id"], record["parent_turn"] = self.db.execute(
+                "SELECT parent_id, parent_turn FROM runs WHERE id = ?", (run_id,)
+            ).fetchone()
         record["config"] = json.loads(record["config"]) if record["config"] else None
         record["state"] = json.loads(record["state"]) if record["state"] else None
         return record

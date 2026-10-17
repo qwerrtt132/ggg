@@ -19,7 +19,7 @@ from .providers import ProviderError
 from .runner import ConfigError, build_team, check_provider, default_config, redact, refuse_secret_fields, run_in_background
 from .store import FINISHED, Store
 from .templates import TEMPLATES
-from .tools import build_tools
+from .tools import build_tools, copy_workspace
 from .transcript import to_json, to_markdown
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -153,7 +153,77 @@ class Handler(BaseHTTPRequestHandler):
                 return self._human_message(run_id)
             if method == "POST" and parts[2] == "stop":
                 return self._stop(run_id)
+            if method == "GET" and parts[2] == "checkpoints":
+                return self._send_json(200, {"checkpoints": app.store.list_checkpoints(run_id)})
+            if method == "POST" and parts[2] == "rewind":
+                return self._rewind(run_id)
+            if method == "POST" and parts[2] == "branch":
+                return self._branch(run_id)
         self._send_json(404, {"error": "not found"})
+
+    def _rewind(self, run_id):
+        """Put a run back at an earlier turn, then continue it with a message. Later turns are dropped from the
+        checkpoints; their events stay in the log, so the history shows what happened."""
+        app = self.server.app
+        body = self._body()
+        turn, text = _turn_number(body), _message_text(body)
+        with app.lock:
+            app.forget_finished()
+            control = app.runs.get(run_id)
+            if control is not None and control.thread.is_alive():
+                return self._send_json(409, {"error": "stop the run before rewinding it"})
+            snapshot = app.store.get_checkpoint(run_id, turn)
+            if snapshot is None:
+                return self._send_json(404, {"error": f"there is no checkpoint for turn {turn}"})
+            if app.active_count() >= app.max_active_runs:
+                return self._send_json(429, {"error": "too many runs are running; wait for one to finish or stop one"})
+            app.store.discard_checkpoints_after(run_id, turn)
+            app.store.save_state(run_id, snapshot)
+            if control is None:
+                control = self._restore_control(run_id, snapshot)
+            else:
+                control.team.restore(snapshot)
+            app.runs[run_id] = control
+            app.store.add_event(run_id, "rewind", {"to_turn": turn})
+            app.store.resume_run(run_id)
+            app.store.add_event(run_id, "human", {"text": text})
+            control.stop.clear()
+            control.thread = run_in_background(
+                app.store, run_id, control.team, lambda: control.team.continue_run(text), control.secrets
+            )
+        self._send_json(202, {"resumed": True})
+
+    def _branch(self, run_id):
+        """Start a new run from a turn of this one. The parent keeps its history; the new run gets a copy of its
+        workspace."""
+        app = self.server.app
+        body = self._body()
+        turn, text = _turn_number(body), _message_text(body)
+        record = app.store.get_run_record(run_id)
+        snapshot = app.store.get_checkpoint(run_id, turn)
+        if snapshot is None:
+            return self._send_json(404, {"error": f"there is no checkpoint for turn {turn}"})
+        if not record["config"]:
+            raise ValueError("this run cannot be branched: it was started before team configs were saved")
+        with app.lock:
+            app.forget_finished()
+            if app.active_count() >= app.max_active_runs:
+                return self._send_json(429, {"error": "too many runs are running; wait for one to finish or stop one"})
+            new_id = uuid.uuid4().hex
+            control = RunControl()
+            team, secrets = _build_for_run(app, new_id, record["config"], control)
+            if app.workspaces:
+                copy_workspace(app.workspaces / run_id, app.workspaces / new_id)
+            app.store.create_run(new_id, record["goal"], record["config"], parent_id=run_id, parent_turn=turn)
+            app.store.save_state(new_id, snapshot)
+            team.restore(snapshot)
+            team.announce()
+            app.store.add_event(new_id, "branched", {"from_run": run_id, "turn": turn})
+            app.store.add_event(new_id, "human", {"text": text})
+            control.team, control.secrets = team, secrets
+            control.thread = run_in_background(app.store, new_id, team, lambda: team.continue_run(text), secrets)
+            app.runs[new_id] = control
+        self._send_json(201, {"id": new_id})
 
     def _start_run(self):
         app = self.server.app
@@ -205,16 +275,18 @@ class Handler(BaseHTTPRequestHandler):
             )
         self._send_json(202, {"resumed": True})
 
-    def _restore_control(self, run_id):
-        """Rebuild a run's team after a server restart, from the saved config and saved agent histories."""
+    def _restore_control(self, run_id, snapshot=None):
+        """Rebuild a run's team after a server restart, or at a given checkpoint, from the saved config."""
         app = self.server.app
         record = app.store.get_run_record(run_id)
         if record is None or not record["config"]:
             raise ValueError("this run cannot be continued: it was started before team configs were saved")
         control = RunControl()
         team, secrets = _build_for_run(app, run_id, record["config"], control)
-        if record["state"]:
-            team.restore(record["state"])
+        if snapshot is None:
+            snapshot = record["state"]
+        if snapshot:
+            team.restore(snapshot)
         control.team, control.secrets = team, secrets
         return control
 
@@ -360,6 +432,20 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if body is not None:
             self.wfile.write(body)
+
+
+def _turn_number(body):
+    try:
+        return int(body.get("turn"))
+    except (TypeError, ValueError):
+        raise ValueError("choose a turn number") from None
+
+
+def _message_text(body):
+    text = str(body.get("message", "")).strip()[:MAX_TEXT]
+    if not text:
+        raise ValueError("write the message to continue with")
+    return text
 
 
 def _build_for_run(app, run_id, config, control):

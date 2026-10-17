@@ -7,6 +7,7 @@ import html
 import ipaddress
 import os
 import re
+import shutil
 import socket
 from pathlib import Path
 from urllib.error import URLError
@@ -111,6 +112,20 @@ class Workspace:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         return f"Wrote {len(content)} characters to {relative}."
+
+
+def copy_workspace(source, destination):
+    """Copy a run's workspace for a branch. Symbolic links are skipped, as they are everywhere in a workspace."""
+    source, destination = Path(source), Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    if not source.is_dir():
+        return
+    shutil.copytree(
+        source,
+        destination,
+        dirs_exist_ok=True,
+        ignore=lambda directory, names: [name for name in names if os.path.islink(os.path.join(directory, name))],
+    )
 
 
 def check_url(url, allow_private=False):

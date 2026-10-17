@@ -114,6 +114,21 @@
         <span id="token-text" class="muted"></span>
       </div>
       <ul id="cards" class="cards" aria-label="Agents"></ul>
+      <section class="timeline-section" aria-labelledby="timeline-title">
+        <h3 id="timeline-title">Turns</h3>
+        <ol id="timeline" class="timeline" aria-label="Turns of this run"></ol>
+        <div id="time-actions" class="time-actions" hidden>
+          <p id="time-selected" class="muted"></p>
+          <label>Message to continue from here
+            <textarea id="time-message" rows="2" placeholder="For example: try again with a shorter draft"></textarea>
+          </label>
+          <div class="inline-form">
+            <button id="rewind" type="button" class="secondary">Rewind here</button>
+            <button id="branch" type="button">Branch from here</button>
+          </div>
+          <p id="time-note" class="muted"></p>
+        </div>
+      </section>
       <ol id="feed" class="feed" role="log" aria-live="polite" aria-label="Run messages"></ol>
       <form id="human-form" class="inline-form">
         <label class="sr-only" for="human-text">Message the lead</label>

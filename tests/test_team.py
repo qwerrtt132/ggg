@@ -292,6 +292,43 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(team.status, "timeout")
         self.assertLess(time.monotonic() - started, 2)
 
+    def test_a_snapshot_carries_the_turn_queues_and_counters(self):
+        lead = ScriptedProvider(reply(call("send_message", to="writer", message="draft")))
+        writer = ScriptedProvider(reply(call("send_message", to="lead", message="here")))
+        first = Team([Agent("lead", "plans", lead, "m"), Agent("writer", "writes", writer, "m")], lead="lead", max_turns=1)
+        first.run("goal")
+        snapshot = json.loads(json.dumps(first.snapshot()))
+
+        self.assertEqual(snapshot["turn"], 1)
+        self.assertEqual(snapshot["ready"], ["writer"])
+        self.assertIn("From lead:\ndraft", snapshot["inboxes"]["writer"][0])
+
+        resumed_lead = ScriptedProvider(reply(call("finish", answer="ok")))
+        resumed_writer = ScriptedProvider(reply(call("send_message", to="lead", message="again")))
+        second = Team([Agent("lead", "plans", resumed_lead, "m"), Agent("writer", "writes", resumed_writer, "m")], lead="lead")
+        second.restore(snapshot)
+
+        self.assertEqual(second.continue_run("and then?"), "ok")
+        self.assertIn("From lead:\ndraft", resumed_writer.calls[0][-1]["text"])
+        self.assertEqual(second.turn_no, 3)
+
+    def test_continuing_keeps_messages_that_were_still_waiting(self):
+        lead = ScriptedProvider(reply(call("send_message", to="writer", message="draft")), reply(call("finish", answer="ok")))
+        writer = ScriptedProvider(reply(call("send_message", to="lead", message="here")))
+        team = Team([Agent("lead", "plans", lead, "m"), Agent("writer", "writes", writer, "m")], lead="lead", max_turns=1)
+        team.run("goal")
+
+        team.max_turns = 10
+        self.assertEqual(team.continue_run("next"), "ok")
+        self.assertEqual(writer.calls[0][-1]["text"], "From lead:\ndraft")
+
+    def test_run_announces_the_roster_again_when_asked(self):
+        events = []
+        lead = ScriptedProvider(reply(call("finish", answer="ok")))
+        team = Team([Agent("lead", "plans", lead, "m")], lead="lead", emit=lambda kind, **data: events.append(kind))
+        team.announce()
+        self.assertEqual(events, ["roster"])
+
     def test_human_message_reaches_the_lead_during_the_run(self):
         lead = ScriptedProvider(reply(call("finish", answer="done")))
         human = queue.Queue()

@@ -34,6 +34,10 @@ The command prints a link with a session token. Open it in your browser. The pag
 - Send the lead a message during a run, or stop the run.
 - Continue a finished run by sending a message. This works after a server restart too, because the team's histories are saved after every turn.
 - Export a run as Markdown or JSON.
+- Go back in time. The Turns row lists a checkpoint for every turn. Select one and write a message:
+  - **Rewind here** puts the run back at that turn and continues with your message. It needs a finished run, and it asks you to confirm. Later turns are dropped from the checkpoints, but their events stay in the history.
+  - **Branch from here** starts a new run from that turn. The original run is unchanged, and the new run gets a copy of its workspace.
+  - Rewinding does not undo files the agents already wrote. Reviewing and reverting file changes is planned with approvals.
 
 Keys: enter them in the API keys panel. They stay on the server and are never shown in full. They live in memory unless you tick "save encrypted". Saved keys are encrypted with a master key at `~/.config/agent_team/master.key` (override with `AGENT_TEAM_MASTER_KEY_FILE`). Back up that file. Without it, saved keys cannot be read and must be entered again. A key can also come from an environment variable named in the provider's config (`api_key_env`), and the page only shows whether that variable is set.
 
