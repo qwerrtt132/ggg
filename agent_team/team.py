@@ -58,6 +58,7 @@ class Agent:
     provider: object
     model: str
     history: list = field(default_factory=list)
+    tools: list = field(default_factory=list)  # names of extra tools this member may use
 
 
 def normalize(text):
@@ -119,6 +120,7 @@ class Team:
         stop_event=None,
         clock=time.monotonic,
         save_state=None,
+        extra_tools=None,
     ):
         names = [agent.name for agent in agents]
         if len(set(names)) != len(names):
@@ -138,6 +140,7 @@ class Team:
         self.stop_event = stop_event or threading.Event()
         self.clock = clock
         self.save_state = save_state  # called with a snapshot after every turn, so a restart can resume
+        self.extra_tools = extra_tools or {}  # name -> (definition, handler), see tools.build_tools
         self.status = None
         self.tokens_used = 0
         self.goal = ""
@@ -216,6 +219,8 @@ class Team:
                 self._enqueue(name, "System: your last reply was cut off by the output limit. Keep messages shorter.")
             if failed:
                 self._enqueue(name, "System: some tool calls failed. Read the results above, fix them, and try again.")
+            elif any(call.name in self.extra_tools for call in reply.tool_calls):
+                self._enqueue(name, "System: the tool results above are ready. Continue your work.")
             if reply.tool_calls:
                 self.silent_turns[name] = 0
             else:
@@ -280,10 +285,13 @@ class Team:
 
     def _tools_for(self, name):
         if name == self.verifier:
-            return [SEND_MESSAGE, SUBMIT_VERDICT]
-        if name == self.lead:
-            return [SEND_MESSAGE, FINISH]
-        return [SEND_MESSAGE]
+            base = [SEND_MESSAGE, SUBMIT_VERDICT]
+        elif name == self.lead:
+            base = [SEND_MESSAGE, FINISH]
+        else:
+            base = [SEND_MESSAGE]
+        extra = [self.extra_tools[tool][0] for tool in self.agents[name].tools if tool in self.extra_tools]
+        return base + extra
 
     def _handle_calls(self, sender, calls):
         """Run one turn's tool calls. Returns (tool result items, decision or None, whether any call failed)."""
@@ -306,6 +314,9 @@ class Team:
     def _execute(self, sender, call):
         """Returns (result text, is_error, final answer or None)."""
         args = call.arguments
+        if call.name in self.extra_tools:
+            content, is_error = self.extra_tools[call.name][1](args)
+            return content, is_error, None
         if call.name == "send_message":
             recipient = str(args.get("to", ""))
             message = str(args.get("message", "")).strip()

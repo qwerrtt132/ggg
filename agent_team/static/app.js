@@ -6,6 +6,10 @@ const FINISHED = new Set(["done", "idle", "max_turns", "timeout", "token_budget"
 const EVENT_KINDS = ["roster", "agent", "message", "turn", "human", "final", "error", "status"];
 const NAME_RULE = /^[a-z][a-z0-9_-]{0,31}$/;
 const DRAFT_KEY = "agent-team-draft";
+const TOOL_GROUPS = [
+  ["files", "Files in the run's workspace"],
+  ["fetch", "Fetch web pages (public addresses only)"],
+];
 const $ = (id) => document.getElementById(id);
 
 const state = {
@@ -214,6 +218,25 @@ function memberRow(member, title, index) {
       }, "model name")
     )
   );
+
+  const tools = el("fieldset", undefined, "tools");
+  tools.append(el("legend", "Tools", "field-label"));
+  for (const [group, description] of TOOL_GROUPS) {
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = (member.tools || []).includes(group);
+    box.addEventListener("change", () => {
+      const chosen = new Set(member.tools || []);
+      if (box.checked) chosen.add(group);
+      else chosen.delete(group);
+      member.tools = [...chosen];
+      changed();
+    });
+    const option = el("label", undefined, "inline");
+    option.append(box, document.createTextNode(` ${description}`));
+    tools.append(option);
+  }
+  row.append(tools);
   return row;
 }
 

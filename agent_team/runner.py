@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .providers import ProviderError, build_provider
 from .team import Agent, Team
+from .tools import GROUPS
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "team.example.json"
 NAME_RULE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -43,7 +44,16 @@ def _check_limit(config, key, default, minimum):
 SECRET_FIELDS = {"api_key", "key", "secret", "token", "password"}
 
 
-def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None, save_state=None):
+def _member_tools(spec, registry):
+    groups = spec.get("tools", [])
+    if not isinstance(groups, list) or any(group not in GROUPS for group in groups):
+        raise ConfigError(f"{spec['name']!r} has an unknown tool group; choose from {sorted(GROUPS)}")
+    if groups and registry is None:
+        raise ConfigError(f"{spec['name']!r} asks for tools, but this run has no workspace for them")
+    return [tool for group in groups for tool in GROUPS[group]]
+
+
+def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None, save_state=None, tools=None):
     """Returns (team, secrets). lookup_key(provider) gives a key from the vault, or None to fall back to the env var."""
     if not isinstance(config, dict):
         raise ConfigError("the team config must be a JSON object")
@@ -79,7 +89,13 @@ def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None, save
         secrets.append(api_key)
         providers[name] = build_provider(name, spec, api_key)
     agents = [
-        Agent(name=spec["name"], role=spec["role"], provider=providers[spec["provider"]], model=spec["model"])
+        Agent(
+            name=spec["name"],
+            role=spec["role"],
+            provider=providers[spec["provider"]],
+            model=spec["model"],
+            tools=_member_tools(spec, tools),
+        )
         for spec in specs
     ]
     team = Team(
@@ -93,6 +109,7 @@ def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None, save
         human_inbox=human_inbox,
         stop_event=stop_event,
         save_state=save_state,
+        extra_tools=tools,
     )
     return team, secrets
 

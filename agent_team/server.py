@@ -17,6 +17,7 @@ from .keys import KeyVault, KeyVaultError
 from .providers import ProviderError
 from .runner import ConfigError, build_team, check_provider, default_config, redact, run_in_background
 from .store import FINISHED, Store
+from .tools import build_tools
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC_FILES = {
@@ -47,11 +48,12 @@ class RunControl:
 
 
 class App:
-    def __init__(self, store, vault, token, max_active_runs=MAX_ACTIVE_RUNS):
+    def __init__(self, store, vault, token, max_active_runs=MAX_ACTIVE_RUNS, workspaces=None):
         self.store = store
         self.vault = vault
         self.token = token
         self.max_active_runs = max_active_runs
+        self.workspaces = workspaces  # folder holding one workspace per run, for the files tools
         self.runs = {}  # run id -> RunControl, for runs started by this process
 
 
@@ -295,6 +297,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def _build_for_run(app, run_id, config, control):
     """Build a run's team wired to the event log, the run's controls, and a checkpoint after each turn."""
+    tools = build_tools(app.workspaces / run_id) if app.workspaces else None
     return build_team(
         config,
         app.vault.get,
@@ -302,6 +305,7 @@ def _build_for_run(app, run_id, config, control):
         human_inbox=control.human,
         stop_event=control.stop,
         save_state=lambda snapshot: app.store.save_state(run_id, snapshot),
+        tools=tools,
     )
 
 
@@ -319,7 +323,7 @@ def serve(port=8765, data_dir="data"):
     store = Store(data / "agent_team.db")
     store.mark_interrupted()
     token = secrets.token_urlsafe(24)
-    server = Server(port, App(store, KeyVault(data), token))
+    server = Server(port, App(store, KeyVault(data), token, workspaces=data / "workspaces"))
     print(f"Agent team is running. Open http://127.0.0.1:{server.server_port}/?token={token}")
     try:
         server.serve_forever()
