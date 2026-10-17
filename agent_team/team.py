@@ -5,7 +5,9 @@ import queue
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+
+from .providers import ToolCall
 
 STALL_REPEATS = 3  # this many near-identical turns in a row counts as stuck
 STALL_SIMILARITY = 0.9
@@ -70,6 +72,21 @@ def same_turn(first, second):
     return long_enough and difflib.SequenceMatcher(None, first, second).ratio() >= STALL_SIMILARITY
 
 
+def history_to_json(history):
+    """Plain data for storing a history. Tool calls become dicts; everything else is already plain."""
+    return [
+        {**item, "tool_calls": [asdict(call) for call in item["tool_calls"]]} if item.get("tool_calls") else item
+        for item in history
+    ]
+
+
+def history_from_json(items):
+    return [
+        {**item, "tool_calls": [ToolCall(**call) for call in item["tool_calls"]]} if item.get("tool_calls") else item
+        for item in items
+    ]
+
+
 def context_view(history, window=HISTORY_WINDOW):
     """The part of an agent's history the model sees. Long histories keep the first item and a tail that starts
     at a user message, so a tool result never loses the call it answers."""
@@ -101,6 +118,7 @@ class Team:
         human_inbox=None,
         stop_event=None,
         clock=time.monotonic,
+        save_state=None,
     ):
         names = [agent.name for agent in agents]
         if len(set(names)) != len(names):
@@ -119,6 +137,7 @@ class Team:
         self.human_inbox = human_inbox
         self.stop_event = stop_event or threading.Event()
         self.clock = clock
+        self.save_state = save_state  # called with a snapshot after every turn, so a restart can resume
         self.status = None
         self.tokens_used = 0
         self.goal = ""
@@ -190,6 +209,7 @@ class Team:
 
             results, decision, failed = self._handle_calls(name, reply.tool_calls)
             agent.history.extend(results)
+            self._checkpoint()
             if decision is not None:
                 return self._finish("done", decision)
             if reply.truncated:
@@ -215,6 +235,23 @@ class Team:
     def _finish(self, status, answer=None):
         self.status = status
         return answer
+
+    def snapshot(self):
+        """Everything needed to continue this team later: each agent's history and the token count."""
+        return {
+            "agents": {name: history_to_json(agent.history) for name, agent in self.agents.items()},
+            "tokens_used": self.tokens_used,
+        }
+
+    def restore(self, snapshot):
+        for name, items in snapshot.get("agents", {}).items():
+            if name in self.agents:
+                self.agents[name].history = history_from_json(items)
+        self.tokens_used = snapshot.get("tokens_used", 0)
+
+    def _checkpoint(self):
+        if self.save_state is not None:
+            self.save_state(self.snapshot())
 
     def _call(self, agent):
         """Run one model call on a worker thread so a stop takes effect at once. Returns None if stopped."""

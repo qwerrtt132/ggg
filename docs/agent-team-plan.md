@@ -1,6 +1,32 @@
 # Agent team: implementation plan
 
-Status: phase 1 done. Phase 2 done, 45 tests passing (including browser tests). Phase 3 has not started. Owner: the repo's maintainer.
+Status: phase 1 and phase 2 done. Phase 3 in progress. Owner: the repo's maintainer.
+
+## Phase 3: capability and durability
+
+| # | Item | Plan |
+|---|---|---|
+| 1 | Resumable runs | After each turn, save every agent's history, the team's counters, and the pending answer to SQLite. Save the run's config too, without keys. After a restart, a message to an interrupted run rebuilds the team from the saved config and the saved state, then continues. Keys come from the vault, so a memory-only key must be entered again. |
+| 2 | Agent tools: files and URLs | Each run gets a workspace folder under the data directory. Members can be given `files` (list, read, write, scoped to the workspace, no path escapes) and `fetch` (http and https only, private and loopback addresses refused). Tools are opt-in per member in the config. |
+| 3 | Role templates and team presets | Built-in role templates (researcher, writer, critic, verifier, coder). The team builder can add a member from a template. Teams can be saved as named presets in SQLite and loaded again. |
+| 4 | Transcript export | Export a run as Markdown or JSON from the run list. |
+| 5 | Packaging | `pyproject.toml` with an `agent-team` command, and `cryptography` as an optional extra. |
+| 6 | Streaming model output | Stream text as it arrives, for both adapters. Tool-call arguments are assembled from the stream. Deferred from phase 2. |
+
+### Deliberately not built
+
+- **Running agent-written code.** Executing model output on the user's machine needs real isolation, such as a container with no network and resource limits. Without that it is a serious risk. The plan leaves this out. Revisit it only with an isolation layer chosen on purpose.
+- **Web search.** It needs a search provider and its own key. `fetch` covers pages whose URL the agent already knows.
+
+### Tests for phase 3
+
+- Restart: a run's state survives a new process, and a message continues it with the same histories.
+- Files: reads and writes stay inside the workspace, and path escapes and symlinks are refused.
+- Fetch: non-http schemes and private addresses are refused. A stub server returns a page.
+- Presets and templates: save, list, load, delete, and invalid input.
+- Export: Markdown and JSON contain the messages, tool results, and final answer.
+- Streaming: a stub server that sends server-sent events gives the same reply as a non-streamed call, including tool calls split across chunks.
+- Browser: a restarted run can be continued from the page.
 
 Phase 2 scope as built:
 - Team builder form with member cards, verifier select, limits, readiness checks (names, roles, models, missing keys) that block Start, and an "Advanced" raw JSON editor. The team draft is kept in the browser's local storage.

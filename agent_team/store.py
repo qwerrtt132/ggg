@@ -39,13 +39,39 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript(SCHEMA)
+        self._ensure_columns()
 
-    def create_run(self, run_id, goal):
+    def _ensure_columns(self):
+        """Databases from earlier versions lack the config and state columns. Add them in place."""
+        present = {row[1] for row in self.db.execute("PRAGMA table_info(runs)")}
+        for column in ("config", "state"):
+            if column not in present:
+                self.db.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
+
+    def create_run(self, run_id, goal, config=None):
         with self.lock:
             self.db.execute(
-                "INSERT INTO runs (id, goal, status, created_at) VALUES (?, ?, 'running', ?)",
-                (run_id, goal, time.time()),
+                "INSERT INTO runs (id, goal, status, created_at, config) VALUES (?, ?, 'running', ?, ?)",
+                (run_id, goal, time.time(), json.dumps(config) if config is not None else None),
             )
+
+    def save_state(self, run_id, snapshot):
+        with self.lock:
+            self.db.execute("UPDATE runs SET state = ? WHERE id = ?", (json.dumps(snapshot), run_id))
+
+    def get_run_record(self, run_id):
+        """The run plus its saved config and state, for rebuilding the team after a restart."""
+        with self.lock:
+            row = self.db.execute(
+                "SELECT id, goal, status, created_at, finished_at, config, state FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        record = dict(zip(RUN_COLUMNS + ("config", "state"), row))
+        record["config"] = json.loads(record["config"]) if record["config"] else None
+        record["state"] = json.loads(record["state"]) if record["state"] else None
+        return record
 
     def add_event(self, run_id, kind, data):
         with self.lock:

@@ -40,10 +40,18 @@ def _check_limit(config, key, default, minimum):
         raise ConfigError(f"{key} must be a whole number of at least {minimum}")
 
 
-def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None):
+SECRET_FIELDS = {"api_key", "key", "secret", "token", "password"}
+
+
+def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None, save_state=None):
     """Returns (team, secrets). lookup_key(provider) gives a key from the vault, or None to fall back to the env var."""
     if not isinstance(config, dict):
         raise ConfigError("the team config must be a JSON object")
+    if not isinstance(config.get("providers", {}), dict):
+        raise ConfigError("providers must be an object")
+    for name, spec in config.get("providers", {}).items():
+        if isinstance(spec, dict) and SECRET_FIELDS & set(spec):
+            raise ConfigError(f"provider {name!r} has a key field in the config; enter keys in the API keys panel")
     try:
         lead_spec = config["lead"]
         teammate_specs = config["teammates"]
@@ -84,6 +92,7 @@ def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None):
         emit=emit,
         human_inbox=human_inbox,
         stop_event=stop_event,
+        save_state=save_state,
     )
     return team, secrets
 

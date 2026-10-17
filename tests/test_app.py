@@ -200,6 +200,42 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(events.count("event: final"), 2)
         self.assertIn("and again", events)
 
+    def test_a_run_survives_a_restart_and_continues(self):
+        self.request("POST", "/api/keys", {"provider": "stub", "key": "sk-restart-7777", "persist": True})
+        status, body = self.request("POST", "/api/runs", {"config": self.stub_config(), "goal": "say hi"})
+        run_id = json.loads(body)["id"]
+        self.request("GET", f"/api/runs/{run_id}/events")
+
+        # A second server process with the same data directory: nothing is held in memory.
+        data = self.root / "data"
+        store = Store(data / "agent_team.db")
+        self.addCleanup(store.db.close)
+        store.mark_interrupted()
+        restarted = Server(0, App(store, KeyVault(data, master_key_path=self.root / "master.key"), self.TOKEN))
+        threading.Thread(target=restarted.serve_forever, daemon=True).start()
+        self.addCleanup(restarted.server_close)
+        self.addCleanup(restarted.shutdown)
+        self.base = f"http://127.0.0.1:{restarted.server_port}"
+
+        status, body = self.request("POST", f"/api/runs/{run_id}/message", {"text": "and after the restart"})
+        self.assertEqual(status, 202)
+        self.assertTrue(json.loads(body)["resumed"])
+
+        status, events = self.request("GET", f"/api/runs/{run_id}/events")
+        self.assertEqual(events.count("event: final"), 2)
+        self.assertIn("and after the restart", events)
+        saved = store.get_run_record(run_id)["state"]
+        self.assertGreater(len(saved["agents"]["lead"]), 2)
+
+    def test_keys_inside_the_config_are_refused(self):
+        config = self.stub_config()
+        config["providers"]["stub"]["api_key"] = "sk-pasted-in-config"
+        status, body = self.request("POST", "/api/runs", {"config": config, "goal": "say hi"})
+
+        self.assertEqual(status, 400)
+        self.assertIn("API keys panel", json.loads(body)["error"])
+        self.assertNotIn("sk-pasted-in-config", body)
+
     def test_key_test_checks_a_key_and_model_without_echoing_it(self):
         self.request("POST", "/api/keys", {"provider": "stub", "key": "sk-check-5555"})
         status, body = self.request("POST", "/api/providers/stub/test", {"model": "m", "spec": {"type": "openai_compatible", "base_url": self.stub_base}})

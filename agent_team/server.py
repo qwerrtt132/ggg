@@ -148,14 +148,8 @@ class Handler(BaseHTTPRequestHandler):
             )
         run_id = uuid.uuid4().hex
         control = RunControl()
-        team, secret_values = build_team(
-            body.get("config"),
-            app.vault.get,
-            emit=lambda kind, **data: app.store.add_event(run_id, kind, data),
-            human_inbox=control.human,
-            stop_event=control.stop,
-        )
-        app.store.create_run(run_id, goal)
+        team, secret_values = _build_for_run(app, run_id, body.get("config"), control)
+        app.store.create_run(run_id, goal, body.get("config"))
         control.team, control.secrets = team, secret_values
         control.thread = run_in_background(app.store, run_id, team, lambda: team.run(goal), secret_values)
         app.runs[run_id] = control
@@ -164,18 +158,19 @@ class Handler(BaseHTTPRequestHandler):
     def _human_message(self, run_id):
         app = self.server.app
         control = app.runs.get(run_id)
-        if control is None:
-            return self._send_json(409, {"error": "this run cannot be continued; the server was restarted since it ran"})
         text = str(self._body().get("text", "")).strip()[:MAX_TEXT]
         if not text:
             raise ValueError("the message is empty")
-        if control.thread.is_alive():
+        if control is not None and control.thread.is_alive():
             control.human.put(text)
             app.store.add_event(run_id, "human", {"text": text})
             return self._send_json(202, {"resumed": False})
         # The run has ended: continue it with the same agents and their histories.
         if self._active_runs() >= app.max_active_runs:
             return self._send_json(429, {"error": "too many runs are running; wait for one to finish or stop one"})
+        if control is None:
+            control = self._restore_control(run_id)
+            app.runs[run_id] = control
         app.store.resume_run(run_id)
         app.store.add_event(run_id, "human", {"text": text})
         control.stop.clear()
@@ -183,6 +178,19 @@ class Handler(BaseHTTPRequestHandler):
             app.store, run_id, control.team, lambda: control.team.continue_run(text), control.secrets
         )
         self._send_json(202, {"resumed": True})
+
+    def _restore_control(self, run_id):
+        """Rebuild a run's team after a server restart, from the saved config and saved agent histories."""
+        app = self.server.app
+        record = app.store.get_run_record(run_id)
+        if record is None or not record["config"]:
+            raise ValueError("this run cannot be continued: it was started before team configs were saved")
+        control = RunControl()
+        team, secrets = _build_for_run(app, run_id, record["config"], control)
+        if record["state"]:
+            team.restore(record["state"])
+        control.team, control.secrets = team, secrets
+        return control
 
     def _active_runs(self):
         return sum(1 for control in self.server.app.runs.values() if control.thread.is_alive())
@@ -283,6 +291,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if body is not None:
             self.wfile.write(body)
+
+
+def _build_for_run(app, run_id, config, control):
+    """Build a run's team wired to the event log, the run's controls, and a checkpoint after each turn."""
+    return build_team(
+        config,
+        app.vault.get,
+        emit=lambda kind, **data: app.store.add_event(run_id, kind, data),
+        human_inbox=control.human,
+        stop_event=control.stop,
+        save_state=lambda snapshot: app.store.save_state(run_id, snapshot),
+    )
 
 
 def _env_keys():
