@@ -30,6 +30,8 @@ def reply(*calls, text="", truncated=False, tokens=0):
 class ScriptedProvider:
     """Returns canned replies in order and records the messages and tool names each call saw."""
 
+    name = "scripted"
+
     def __init__(self, *replies):
         self.replies = list(replies)
         self.calls = []
@@ -208,6 +210,8 @@ class TeamTests(unittest.TestCase):
         release = threading.Event()
 
         class SlowProvider:
+            name = "slow"
+
             def complete(self, model, system, messages, tools):
                 release.wait(5)
                 return reply(call("finish", answer="late"))
@@ -234,6 +238,37 @@ class TeamTests(unittest.TestCase):
 
         team.run("goal")
         self.assertIn("make the title shorter", lead.calls[0][0]["text"])
+
+    def test_run_announces_the_roster_and_agent_states(self):
+        events = []
+        lead = ScriptedProvider(reply(call("finish", answer="ok")))
+        team = Team(
+            [Agent("lead", "plans", lead, "m1")],
+            lead="lead",
+            max_tokens=500,
+            emit=lambda kind, **data: events.append((kind, data)),
+        )
+
+        team.run("goal")
+        kinds = [kind for kind, _ in events]
+        self.assertEqual(kinds[0], "roster")
+        roster = events[0][1]
+        self.assertEqual(roster["lead"], "lead")
+        self.assertEqual(roster["max_tokens"], 500)
+        self.assertEqual(roster["members"], [{"name": "lead", "role": "plans", "model": "m1", "provider": "scripted"}])
+        self.assertEqual(events[1], ("agent", {"name": "lead", "state": "thinking"}))
+        self.assertEqual(events[2], ("agent", {"name": "lead", "state": "idle"}))
+
+    def test_continue_run_keeps_every_agent_history(self):
+        lead = ScriptedProvider(reply(call("finish", answer="first answer")), reply(call("finish", answer="second answer")))
+        team = Team([Agent("lead", "plans", lead, "m")], lead="lead")
+
+        self.assertEqual(team.run("goal"), "first answer")
+        self.assertEqual(team.continue_run("make it shorter"), "second answer")
+        self.assertEqual(team.status, "done")
+        second_call = lead.calls[1]
+        self.assertEqual(second_call[0]["text"], "From the user:\ngoal")
+        self.assertIn("make it shorter", second_call[-1]["text"])
 
     def test_rejects_bad_team_shapes(self):
         provider = ScriptedProvider()

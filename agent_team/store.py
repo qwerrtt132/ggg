@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 
-FINISHED = {"done", "idle", "max_turns", "timeout", "token_budget", "stalled", "stopped", "failed", "interrupted"}
+FINISHED = {"done", "idle", "max_turns", "timeout", "token_budget", "stalled", "stopped", "failed", "interrupted", "no_progress"}
 RUN_COLUMNS = ("id", "goal", "status", "created_at", "finished_at")
 
 SCHEMA = """
@@ -54,19 +54,10 @@ class Store:
 
     def finish_run(self, run_id, status):
         """Record the final status as an event and on the run, in one transaction."""
-        with self.lock:
-            self.db.execute("BEGIN")
-            try:
-                self._insert_event(run_id, "status", {"status": status})
-                self.db.execute(
-                    "UPDATE runs SET status = ?, finished_at = ? WHERE id = ?",
-                    (status, time.time(), run_id),
-                )
-                self.db.execute("COMMIT")
-            except Exception:
-                self.db.execute("ROLLBACK")
-                raise
-            self._changed()
+        self._set_status(run_id, status, finished=True)
+
+    def resume_run(self, run_id):
+        self._set_status(run_id, "running", finished=False)
 
     def mark_interrupted(self):
         """Runs still marked running when the app starts were cut off by a restart."""
@@ -108,6 +99,21 @@ class Store:
             if self.version == seen:
                 self.changed.wait(timeout)
             return self.version != seen
+
+    def _set_status(self, run_id, status, finished):
+        with self.lock:
+            self.db.execute("BEGIN")
+            try:
+                self._insert_event(run_id, "status", {"status": status})
+                self.db.execute(
+                    "UPDATE runs SET status = ?, finished_at = ? WHERE id = ?",
+                    (status, time.time() if finished else None, run_id),
+                )
+                self.db.execute("COMMIT")
+            except Exception:
+                self.db.execute("ROLLBACK")
+                raise
+            self._changed()
 
     def _insert_event(self, run_id, kind, data):
         self.db.execute(

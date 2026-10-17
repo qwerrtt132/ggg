@@ -1,6 +1,16 @@
 # Agent team: implementation plan
 
-Status: phase 1 done, 37 tests passing. Phase 2 has not started. Owner: the repo's maintainer.
+Status: phase 1 done. Phase 2 done, 45 tests passing (including browser tests). Phase 3 has not started. Owner: the repo's maintainer.
+
+Phase 2 scope as built:
+- Team builder form with member cards, verifier select, limits, readiness checks (names, roles, models, missing keys) that block Start, and an "Advanced" raw JSON editor. The team draft is kept in the browser's local storage.
+- Agent cards with live state (thinking or idle), tokens per agent, and a run-level token meter against the budget.
+- Key panel: status per provider (saved, this session, environment, or missing), Test button that makes one tiny request with the team's model, Replace and Remove. Environment keys are reported as yes or no only.
+- Continue a finished run by sending a message. Every agent keeps its history. This works only while the server process is alive, because histories are held in memory.
+- Feed only auto-scrolls when you are at the bottom. Live-region announcements. Connection state shown in the run status. Ctrl+Enter starts a run.
+- Concurrency cap returns HTTP 429 with a clear message.
+
+Deferred to phase 3: streamed model output (needs streaming parsers for both providers), resumable run state across restarts.
 
 Phase 1 notes from implementation:
 - The stall check compares short turns exactly and only applies similarity to turns of 80 characters or more. Short messages like "try 1" and "try 2" are different turns.

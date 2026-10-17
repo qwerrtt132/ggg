@@ -2,12 +2,29 @@
 const token = new URLSearchParams(location.search).get("token") || "";
 history.replaceState(null, "", "/");
 
-const FINISHED = new Set(["done", "idle", "max_turns", "timeout", "token_budget", "stalled", "stopped", "failed", "interrupted"]);
-const EVENT_KINDS = ["message", "turn", "human", "final", "error", "status"];
+const FINISHED = new Set(["done", "idle", "max_turns", "timeout", "token_budget", "stalled", "stopped", "failed", "interrupted", "no_progress"]);
+const EVENT_KINDS = ["roster", "agent", "message", "turn", "human", "final", "error", "status"];
+const NAME_RULE = /^[a-z][a-z0-9_-]{0,31}$/;
+const DRAFT_KEY = "agent-team-draft";
 const $ = (id) => document.getElementById(id);
 
-let stream = null;
-let currentRunId = null;
+const state = {
+  keys: {},
+  envKeys: {},
+  defaultConfig: null,
+  team: null,
+  runId: null,
+  goal: "",
+  finished: false,
+  status: "",
+  connection: "",
+  stream: null,
+  maxTokens: null,
+  tokensUsed: 0,
+};
+let cards = new Map();
+
+// ---------- plumbing ----------
 
 async function api(method, path, body) {
   const response = await fetch(`/api${path}`, {
@@ -20,12 +37,18 @@ async function api(method, path, body) {
   return data;
 }
 
+function showNotice(text, kind = "error") {
+  const notice = $("notice");
+  notice.textContent = text;
+  notice.className = `notice ${kind}`;
+}
+
 async function attempt(action) {
-  $("notice").textContent = "";
+  showNotice("");
   try {
     await action();
   } catch (error) {
-    $("notice").textContent = error.message;
+    showNotice(error.message);
   }
 }
 
@@ -36,22 +59,232 @@ function el(tag, text, className) {
   return node;
 }
 
-function renderKeys(keys) {
-  const list = $("key-list");
-  list.replaceChildren();
-  if (Object.keys(keys).length === 0) list.append(el("li", "No keys yet.", "muted"));
-  for (const [name, info] of Object.entries(keys)) {
-    const item = el("li");
-    const where = info.persisted ? "saved" : "this session only";
-    item.append(el("strong", name), el("span", `${info.hint} · ${where}`, "muted"));
-    const remove = el("button", "Remove", "secondary");
-    remove.addEventListener("click", () =>
-      attempt(async () => renderKeys((await api("DELETE", `/keys/${encodeURIComponent(name)}`)).keys))
-    );
-    item.append(remove);
-    list.append(item);
+function loadDraft() {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
   }
 }
+
+function saveDraft() {
+  try {
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(state.team));
+  } catch {
+    // Storage can be blocked. The team still works without the draft.
+  }
+}
+
+// ---------- keys ----------
+
+function keyStatus(provider) {
+  if (state.keys[provider]) return state.keys[provider].persisted ? "saved" : "this session";
+  if (state.envKeys[provider]) return "environment";
+  return "missing";
+}
+
+function modelFor(provider) {
+  const members = [state.team.lead, ...state.team.teammates];
+  return members.find((member) => member.provider === provider)?.model || "";
+}
+
+function renderKeys() {
+  const list = $("key-list");
+  list.replaceChildren();
+  const names = [...new Set([...Object.keys(state.team.providers), ...Object.keys(state.keys)])].sort();
+  if (names.length === 0) list.append(el("li", "No providers in the team yet.", "muted"));
+  for (const name of names) {
+    const status = keyStatus(name);
+    const hint = state.keys[name]?.hint;
+    const item = el("li");
+    item.append(
+      el("strong", name),
+      el("span", hint ? `${status} · ${hint}` : status, status === "missing" ? "error" : "muted")
+    );
+    const actions = el("span", undefined, "actions");
+    const test = el("button", "Test", "secondary");
+    test.addEventListener("click", () => testKey(name));
+    const add = el("button", status === "missing" ? "Add key" : "Replace", "secondary");
+    add.addEventListener("click", () => {
+      $("keys-details").open = true;
+      $("key-provider").value = name;
+      $("key-value").focus();
+    });
+    actions.append(test, add);
+    if (state.keys[name]) {
+      const remove = el("button", "Remove", "secondary");
+      remove.addEventListener("click", () =>
+        attempt(async () => {
+          state.keys = (await api("DELETE", `/keys/${encodeURIComponent(name)}`)).keys;
+          renderKeys();
+        })
+      );
+      actions.append(remove);
+    }
+    item.append(actions);
+    list.append(item);
+  }
+  renderReadiness();
+}
+
+function testKey(name) {
+  const model = modelFor(name);
+  if (!model) {
+    showNotice(`Add a team member that uses ${name} first, so there is a model to test with.`);
+    return;
+  }
+  attempt(async () => {
+    const data = await api("POST", `/providers/${encodeURIComponent(name)}/test`, {
+      model,
+      spec: state.team.providers[name],
+    });
+    showNotice(`${name} works with ${model}. Reply: "${data.reply}"`, "ok");
+  });
+}
+
+// ---------- team editor ----------
+
+function labelled(text, control) {
+  const wrapper = el("label");
+  wrapper.append(el("span", text, "field-label"), control);
+  return wrapper;
+}
+
+function textField(value, onInput, placeholder = "") {
+  const input = document.createElement("input");
+  input.type = "text";
+  input.value = value ?? "";
+  input.placeholder = placeholder;
+  input.addEventListener("input", () => onInput(input.value));
+  return input;
+}
+
+function memberRow(member, title, index) {
+  const row = el("div", undefined, "member");
+  const heading = el("div", undefined, "member-title");
+  heading.append(el("strong", title));
+  if (index !== null) {
+    const remove = el("button", "Remove", "secondary");
+    remove.addEventListener("click", () => {
+      const [gone] = state.team.teammates.splice(index, 1);
+      if (state.team.verifier === gone.name) delete state.team.verifier;
+      renderTeam();
+    });
+    heading.append(remove);
+  }
+  row.append(heading);
+
+  row.append(
+    labelled(
+      "Name",
+      textField(member.name, (value) => {
+        member.name = value.trim();
+        renderVerifierOptions();
+        changed();
+      }, "researcher")
+    )
+  );
+
+  const role = document.createElement("textarea");
+  role.rows = 2;
+  role.value = member.role ?? "";
+  role.placeholder = "What this agent is responsible for";
+  role.addEventListener("input", () => {
+    member.role = role.value;
+    changed();
+  });
+  row.append(labelled("Role", role));
+
+  const provider = document.createElement("select");
+  for (const name of Object.keys(state.team.providers)) provider.append(new Option(name, name));
+  provider.value = member.provider;
+  provider.addEventListener("change", () => {
+    member.provider = provider.value;
+    changed();
+  });
+  row.append(labelled("Provider", provider));
+
+  row.append(
+    labelled(
+      "Model",
+      textField(member.model, (value) => {
+        member.model = value.trim();
+        changed();
+      }, "model name")
+    )
+  );
+  return row;
+}
+
+function renderVerifierOptions() {
+  const select = $("verifier");
+  const current = state.team.verifier || "";
+  select.replaceChildren(new Option("No verifier", ""));
+  for (const member of state.team.teammates) {
+    if (member.name) select.append(new Option(member.name, member.name));
+  }
+  select.value = [...select.options].some((option) => option.value === current) ? current : "";
+}
+
+function renderTeam() {
+  const team = state.team;
+  const members = $("members");
+  members.replaceChildren(memberRow(team.lead, "Lead", null));
+  team.teammates.forEach((member, index) => members.append(memberRow(member, `Teammate ${index + 1}`, index)));
+  renderVerifierOptions();
+  $("max-turns").value = team.max_turns ?? "";
+  $("max-seconds").value = team.max_seconds ?? "";
+  $("max-tokens").value = team.max_tokens ?? "";
+  if (document.activeElement !== $("config")) {
+    $("config").value = JSON.stringify(team, null, 2);
+    $("config-error").textContent = "";
+  }
+  changed();
+}
+
+function changed() {
+  saveDraft();
+  renderKeys();
+  renderReadiness();
+  if (document.activeElement !== $("config")) $("config").value = JSON.stringify(state.team, null, 2);
+}
+
+function problems() {
+  const team = state.team;
+  const members = [team.lead, ...team.teammates];
+  const issues = [];
+  for (const member of members) {
+    if (!NAME_RULE.test(member.name || "")) {
+      issues.push(`“${member.name || ""}” is not a valid name. Use lowercase letters, digits, - or _, starting with a letter.`);
+    }
+    if (!member.role?.trim()) issues.push(`${member.name || "A member"} needs a role.`);
+    if (!member.model?.trim()) issues.push(`${member.name || "A member"} needs a model.`);
+  }
+  const names = members.map((member) => member.name);
+  if (new Set(names).size !== names.length) issues.push("Team member names must be unique.");
+  for (const provider of new Set(members.map((member) => member.provider))) {
+    if (keyStatus(provider) === "missing") issues.push(`No API key for ${provider} yet. Add one in API keys.`);
+  }
+  if (!$("goal").value.trim()) issues.push("Write a goal for the team.");
+  return issues;
+}
+
+function renderReadiness() {
+  const issues = problems();
+  const box = $("readiness");
+  box.replaceChildren(...issues.map((issue) => el("p", issue, "error")));
+  $("start").disabled = issues.length > 0;
+}
+
+function setLimit(key, value) {
+  const number = parseInt(value, 10);
+  if (Number.isFinite(number)) state.team[key] = number;
+  else delete state.team[key];
+  changed();
+}
+
+// ---------- runs ----------
 
 async function loadRuns() {
   const { runs } = await api("GET", "/runs");
@@ -67,41 +300,71 @@ async function loadRuns() {
   }
 }
 
-async function loadState() {
-  const state = await api("GET", "/providers");
-  renderKeys(state.keys);
-  if (!$("config").value) $("config").value = JSON.stringify(state.default_config, null, 2);
-  await loadRuns();
-}
-
 function openRun(id, goal, status) {
-  if (stream) stream.close();
-  currentRunId = id;
+  if (state.stream) state.stream.close();
+  state.runId = id;
+  state.goal = goal;
+  state.status = status;
+  state.finished = FINISHED.has(status);
+  state.connection = "connecting";
+  state.tokensUsed = 0;
   $("run-title").textContent = goal;
-  $("run-status").textContent = `Status: ${status}`;
   $("feed").replaceChildren();
-  stream = new EventSource(`/api/runs/${id}/events?token=${encodeURIComponent(token)}`);
+  $("cards").replaceChildren();
+  cards = new Map();
+  $("meter").hidden = true;
+  refreshRunStatus();
+  updateControls();
+
+  const stream = new EventSource(`/api/runs/${id}/events?token=${encodeURIComponent(token)}`);
+  state.stream = stream;
+  stream.onopen = () => {
+    if (state.stream !== stream) return;
+    state.connection = "live";
+    refreshRunStatus();
+  };
+  stream.onerror = () => {
+    if (state.stream !== stream || stream.readyState === EventSource.CLOSED) return;
+    state.connection = "reconnecting";
+    refreshRunStatus();
+  };
   for (const kind of EVENT_KINDS) {
-    stream.addEventListener(kind, (event) => render(kind, JSON.parse(event.data), id));
+    stream.addEventListener(kind, (event) => {
+      if (state.stream === stream) render(kind, JSON.parse(event.data));
+    });
   }
+  stream.addEventListener("end", () => {
+    if (state.stream !== stream) return;
+    stream.close();
+    state.connection = "closed";
+    refreshRunStatus();
+  });
 }
 
-function render(kind, data, runId) {
-  if (runId !== currentRunId) return;
-  if (kind === "status") {
-    $("run-status").textContent = `Status: ${data.status}`;
-    if (FINISHED.has(data.status)) {
-      stream.close();
-      attempt(loadRuns);
-    }
-    return;
-  }
+function refreshRunStatus() {
+  const connection = state.connection === "live" ? "" : ` · ${state.connection}`;
+  $("run-status").textContent = `Status: ${state.status}${connection}`;
+}
+
+function updateControls() {
+  $("stop").disabled = !state.runId || state.finished;
+  $("human-text").placeholder = state.finished
+    ? "This run has finished. Send a message to continue it with the same agents."
+    : "Message the lead during the run";
+}
+
+function render(kind, data) {
+  if (kind === "roster") return renderRoster(data);
+  if (kind === "agent") return updateAgent(data);
+  if (kind === "status") return finishRun(data.status);
+  if (kind === "turn") return updateTurn(data);
+
+  const feed = $("feed");
+  const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
   const item = el("li", undefined, `event ${kind}`);
   if (kind === "message") {
+    item.style.setProperty("--hue", hue(data.sender));
     item.append(el("div", `${data.sender} → ${data.recipient}`, "who"), el("div", data.text, "text"));
-  } else if (kind === "turn") {
-    const cut = data.truncated ? " · reply cut off by the output limit" : "";
-    item.append(el("div", `${data.agent} used ${data.tokens} tokens (run total ${data.total_tokens})${cut}`, "muted"));
   } else if (kind === "human") {
     item.append(el("div", "You", "who"), el("div", data.text, "text"));
   } else if (kind === "final") {
@@ -109,8 +372,89 @@ function render(kind, data, runId) {
   } else if (kind === "error") {
     item.append(el("div", data.message, "error"));
   }
-  $("feed").append(item);
-  item.scrollIntoView({ block: "end" });
+  feed.append(item);
+  if (nearBottom || kind === "human") item.scrollIntoView({ block: "end" });
+}
+
+function finishRun(status) {
+  state.status = status;
+  state.finished = FINISHED.has(status);
+  refreshRunStatus();
+  updateControls();
+  attempt(loadRuns);
+}
+
+function renderRoster(roster) {
+  state.maxTokens = roster.max_tokens ?? null;
+  cards = new Map();
+  $("cards").replaceChildren();
+  for (const member of roster.members) {
+    const role = member.name === roster.lead ? "lead" : member.name === roster.verifier ? "verifier" : "teammate";
+    const card = el("li", undefined, "card");
+    card.dataset.state = "idle";
+    card.style.setProperty("--hue", hue(member.name));
+    const stateLine = el("div", "idle", "card-state");
+    const tokens = el("div", "0 tokens", "muted");
+    card.append(
+      el("div", member.name, "card-title"),
+      el("div", `${role} · ${member.model} · ${member.provider}`, "muted"),
+      stateLine,
+      tokens
+    );
+    $("cards").append(card);
+    cards.set(member.name, { card, stateLine, tokens, used: 0 });
+  }
+  $("meter").hidden = false;
+  updateMeter();
+}
+
+function updateAgent({ name, state: agentState }) {
+  const entry = cards.get(name);
+  if (!entry) return;
+  entry.card.dataset.state = agentState;
+  entry.stateLine.textContent = agentState;
+}
+
+function updateTurn(data) {
+  const entry = cards.get(data.agent);
+  if (entry) {
+    entry.used += data.tokens;
+    entry.tokens.textContent = `${entry.used.toLocaleString()} tokens${data.truncated ? " · last reply cut off" : ""}`;
+  }
+  state.tokensUsed = data.total_tokens;
+  updateMeter();
+}
+
+function updateMeter() {
+  const meter = $("token-meter");
+  const used = state.tokensUsed;
+  if (state.maxTokens) {
+    meter.max = state.maxTokens;
+    meter.value = Math.min(used, state.maxTokens);
+    $("token-text").textContent = `${used.toLocaleString()} of ${state.maxTokens.toLocaleString()} tokens`;
+  } else {
+    meter.max = Math.max(used, 1);
+    meter.value = used;
+    $("token-text").textContent = `${used.toLocaleString()} tokens used (no budget set)`;
+  }
+}
+
+function hue(name) {
+  let total = 0;
+  for (const character of name) total = (total * 31 + character.charCodeAt(0)) % 360;
+  return total;
+}
+
+// ---------- forms and buttons ----------
+
+async function loadState() {
+  const data = await api("GET", "/providers");
+  state.keys = data.keys;
+  state.envKeys = data.env_keys;
+  state.defaultConfig = data.default_config;
+  state.team = loadDraft() || structuredClone(data.default_config);
+  renderTeam();
+  await loadRuns();
 }
 
 $("key-form").addEventListener("submit", (event) => {
@@ -122,20 +466,66 @@ $("key-form").addEventListener("submit", (event) => {
       persist: $("key-persist").checked,
     });
     $("key-value").value = "";
-    renderKeys(data.keys);
+    state.keys = data.keys;
+    renderKeys();
+    showNotice("Key saved.", "ok");
   });
+});
+
+$("add-member").addEventListener("click", () => {
+  const taken = new Set([state.team.lead.name, ...state.team.teammates.map((member) => member.name)]);
+  let number = state.team.teammates.length + 2;
+  while (taken.has(`agent_${number}`)) number += 1;
+  state.team.teammates.push({
+    name: `agent_${number}`,
+    role: "",
+    provider: Object.keys(state.team.providers)[0],
+    model: state.team.lead.model,
+  });
+  renderTeam();
+});
+
+$("reset-team").addEventListener("click", () => {
+  state.team = structuredClone(state.defaultConfig);
+  renderTeam();
+});
+
+$("verifier").addEventListener("change", (event) => {
+  if (event.target.value) state.team.verifier = event.target.value;
+  else delete state.team.verifier;
+  changed();
+});
+
+$("max-turns").addEventListener("input", (event) => setLimit("max_turns", event.target.value));
+$("max-seconds").addEventListener("input", (event) => setLimit("max_seconds", event.target.value));
+$("max-tokens").addEventListener("input", (event) => setLimit("max_tokens", event.target.value));
+
+$("config").addEventListener("input", (event) => {
+  try {
+    const parsed = JSON.parse(event.target.value);
+    if (!parsed || !parsed.lead || !Array.isArray(parsed.teammates) || !parsed.providers) {
+      throw new Error("it needs lead, teammates, and providers");
+    }
+    state.team = parsed;
+    $("config-error").textContent = "";
+    saveDraft();
+    renderKeys();
+    renderVerifierOptions();
+    renderReadiness();
+  } catch (error) {
+    $("config-error").textContent = `Not a valid team yet: ${error.message}`;
+  }
+});
+
+$("goal").addEventListener("input", () => renderReadiness());
+$("goal").addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !$("start").disabled) $("start").click();
 });
 
 $("start").addEventListener("click", () =>
   attempt(async () => {
-    let config;
-    try {
-      config = JSON.parse($("config").value);
-    } catch (error) {
-      throw new Error(`The team config is not valid JSON: ${error.message}`);
-    }
     const goal = $("goal").value.trim();
-    const { id } = await api("POST", "/runs", { config, goal });
+    const { id } = await api("POST", "/runs", { config: state.team, goal });
     await loadRuns();
     openRun(id, goal, "running");
   })
@@ -144,15 +534,17 @@ $("start").addEventListener("click", () =>
 $("human-form").addEventListener("submit", (event) => {
   event.preventDefault();
   const text = $("human-text").value.trim();
-  if (!text || !currentRunId) return;
+  if (!text || !state.runId) return;
   attempt(async () => {
-    await api("POST", `/runs/${currentRunId}/message`, { text });
+    const data = await api("POST", `/runs/${state.runId}/message`, { text });
     $("human-text").value = "";
+    if (data.resumed) openRun(state.runId, state.goal, "running");
+    await loadRuns();
   });
 });
 
 $("stop").addEventListener("click", () => {
-  if (currentRunId) attempt(() => api("POST", `/runs/${currentRunId}/stop`, {}));
+  if (state.runId) attempt(() => api("POST", `/runs/${state.runId}/stop`, {}));
 });
 
 attempt(loadState);

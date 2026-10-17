@@ -45,6 +45,7 @@ class StoreTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.store = Store(Path(directory.name) / "runs.db")
+        self.addCleanup(self.store.db.close)
 
     def test_events_replay_in_order_after_a_sequence_number(self):
         self.store.create_run("r1", "goal")
@@ -122,6 +123,7 @@ class ServerTests(unittest.TestCase):
 
         data = self.root / "data"
         store = Store(data / "agent_team.db")
+        self.addCleanup(store.db.close)
         vault = KeyVault(data, master_key_path=self.root / "master.key")
         self.server = Server(0, App(store, vault, self.TOKEN))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -176,6 +178,52 @@ class ServerTests(unittest.TestCase):
         status, body = self.request("POST", "/api/runs", {"config": config, "goal": "say hi"})
         self.assertEqual(status, 429)
         self.assertIn("already running", json.loads(body)["error"])
+
+    def stub_config(self):
+        return {
+            "providers": {"stub": {"type": "openai_compatible", "base_url": self.stub_base}},
+            "lead": {"name": "lead", "provider": "stub", "model": "m", "role": "answer"},
+            "teammates": [],
+        }
+
+    def test_a_finished_run_continues_with_a_message(self):
+        self.request("POST", "/api/keys", {"provider": "stub", "key": "sk-resume-0000"})
+        status, body = self.request("POST", "/api/runs", {"config": self.stub_config(), "goal": "say hi"})
+        run_id = json.loads(body)["id"]
+        self.request("GET", f"/api/runs/{run_id}/events")  # returns once the first run has finished
+
+        status, body = self.request("POST", f"/api/runs/{run_id}/message", {"text": "and again"})
+        self.assertEqual(status, 202)
+        self.assertTrue(json.loads(body)["resumed"])
+
+        status, events = self.request("GET", f"/api/runs/{run_id}/events")
+        self.assertEqual(events.count("event: final"), 2)
+        self.assertIn("and again", events)
+
+    def test_key_test_checks_a_key_and_model_without_echoing_it(self):
+        self.request("POST", "/api/keys", {"provider": "stub", "key": "sk-check-5555"})
+        status, body = self.request("POST", "/api/providers/stub/test", {"model": "m", "spec": {"type": "openai_compatible", "base_url": self.stub_base}})
+
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["ok"])
+        self.assertNotIn("sk-check-5555", body)
+
+    def test_providers_report_environment_keys_as_yes_or_no(self):
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-from-env"}):
+            status, body = self.request("GET", "/api/providers")
+
+        self.assertEqual(status, 200)
+        env_keys = json.loads(body)["env_keys"]
+        self.assertIs(env_keys["openai"], True)
+        self.assertNotIn("sk-from-env", body)
+
+    def test_invalid_member_names_are_refused(self):
+        config = self.stub_config()
+        config["lead"]["name"] = "Lead Agent"
+        status, body = self.request("POST", "/api/runs", {"config": config, "goal": "say hi"})
+
+        self.assertEqual(status, 400)
+        self.assertIn("needs a name", json.loads(body)["error"])
 
     def test_saved_key_is_encrypted_on_disk(self):
         self.request("POST", "/api/keys", {"provider": "stub", "key": "sk-saved-9999", "persist": True})

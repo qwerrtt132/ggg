@@ -9,51 +9,96 @@
 <body>
   <header>
     <h1>Agent team</h1>
-    <p id="notice" class="error" role="alert"></p>
+    <p id="notice" class="notice" role="alert"></p>
   </header>
+
   <main>
-    <section class="panel">
-      <h2>API keys</h2>
-      <p class="muted">Keys stay on this server. They are never shown again in full. They live in memory only, unless you choose to save them encrypted.</p>
-      <form id="key-form">
-        <label>Provider name
-          <input id="key-provider" placeholder="anthropic" required pattern="[a-z0-9_-]{1,40}" autocomplete="off">
-        </label>
-        <label>API key
-          <input id="key-value" type="password" required autocomplete="off">
-        </label>
-        <label class="inline">
-          <input id="key-persist" type="checkbox"> save encrypted on this machine
-        </label>
-        <button type="submit">Save key</button>
-      </form>
+    <section class="panel" aria-labelledby="keys-title">
+      <h2 id="keys-title">API keys</h2>
+      <p class="muted">Keys stay on this server and are never shown in full. They live in memory unless you save them encrypted.</p>
       <ul id="key-list" class="list"></ul>
+
+      <details id="keys-details">
+        <summary>Add or replace a key</summary>
+        <form id="key-form">
+          <label>Provider name
+            <input id="key-provider" required pattern="[a-z0-9_-]{1,40}" autocomplete="off" placeholder="anthropic">
+          </label>
+          <label>API key
+            <input id="key-value" type="password" required autocomplete="off">
+          </label>
+          <label class="inline">
+            <input id="key-persist" type="checkbox"> save encrypted on this machine
+          </label>
+          <button type="submit">Save key</button>
+        </form>
+      </details>
     </section>
 
-    <section class="panel">
-      <h2>New run</h2>
-      <label>Team config (JSON)
-        <textarea id="config" rows="16" spellcheck="false" class="mono"></textarea>
-      </label>
+    <section class="panel" aria-labelledby="team-title">
+      <h2 id="team-title">Team</h2>
+      <div id="readiness" class="readiness" aria-live="polite"></div>
+
+      <fieldset class="members">
+        <legend class="sr-only">Team members</legend>
+        <div id="members"></div>
+        <button id="add-member" type="button" class="secondary">Add teammate</button>
+      </fieldset>
+
+      <div class="grid4">
+        <label>Verifier
+          <select id="verifier"></select>
+        </label>
+        <label>Max turns
+          <input id="max-turns" type="number" min="1" step="1">
+        </label>
+        <label>Time limit (seconds)
+          <input id="max-seconds" type="number" min="10" step="1">
+        </label>
+        <label>Token budget
+          <input id="max-tokens" type="number" min="1000" step="1000" placeholder="no limit">
+        </label>
+      </div>
+      <button id="reset-team" type="button" class="secondary">Reset to example team</button>
+
+      <details>
+        <summary>Advanced: raw config JSON</summary>
+        <textarea id="config" rows="14" spellcheck="false" class="mono" aria-describedby="config-error"></textarea>
+        <p id="config-error" class="error"></p>
+      </details>
+    </section>
+
+    <section class="panel" aria-labelledby="start-title">
+      <h2 id="start-title">New run</h2>
       <label>Goal
-        <textarea id="goal" rows="3" placeholder="What should the team produce?"></textarea>
+        <textarea id="goal" rows="4" placeholder="What should the team produce? (Ctrl+Enter starts the run)"></textarea>
       </label>
       <button id="start" type="button">Start run</button>
+
       <h2>Past runs</h2>
       <ul id="run-list" class="list"></ul>
     </section>
 
-    <section class="panel wide">
-      <h2 id="run-title">No run selected</h2>
-      <p id="run-status" class="muted"></p>
-      <ol id="feed" class="feed"></ol>
+    <section class="panel wide" aria-labelledby="run-title">
+      <div class="run-head">
+        <h2 id="run-title">No run selected</h2>
+        <p id="run-status" class="muted" role="status"></p>
+      </div>
+      <div id="meter" class="meter" hidden>
+        <progress id="token-meter" max="100" value="0"></progress>
+        <span id="token-text" class="muted"></span>
+      </div>
+      <ul id="cards" class="cards" aria-label="Agents"></ul>
+      <ol id="feed" class="feed" role="log" aria-live="polite" aria-label="Run messages"></ol>
       <form id="human-form" class="inline-form">
-        <input id="human-text" placeholder="Send the lead a message during the run" autocomplete="off">
+        <label class="sr-only" for="human-text">Message the lead</label>
+        <input id="human-text" autocomplete="off" placeholder="Message the lead during the run">
         <button type="submit">Send</button>
         <button id="stop" type="button" class="secondary">Stop run</button>
       </form>
     </section>
   </main>
+
   <script src="/static/app.js" type="module"></script>
 </body>
 </html>

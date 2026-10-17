@@ -2,6 +2,7 @@
 
 import hmac
 import json
+import os
 import queue
 import re
 import secrets
@@ -14,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .keys import KeyVault, KeyVaultError
 from .providers import ProviderError
-from .runner import ConfigError, build_team, default_config, run_in_background
+from .runner import ConfigError, build_team, check_provider, default_config, redact, run_in_background
 from .store import FINISHED, Store
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -41,6 +42,8 @@ class RunControl:
     human: queue.Queue = field(default_factory=queue.Queue)
     stop: threading.Event = field(default_factory=threading.Event)
     thread: threading.Thread = None
+    team: object = None
+    secrets: list = field(default_factory=list)
 
 
 class App:
@@ -96,7 +99,16 @@ class Handler(BaseHTTPRequestHandler):
     def _api(self, method, parts, query):
         app = self.server.app
         if method == "GET" and parts == ["providers"]:
-            return self._send_json(200, {"keys": app.vault.status(), "default_config": default_config()})
+            return self._send_json(
+                200,
+                {
+                    "keys": app.vault.status(),
+                    "env_keys": _env_keys(),
+                    "default_config": default_config(),
+                },
+            )
+        if method == "POST" and len(parts) == 3 and parts[0] == "providers" and parts[2] == "test":
+            return self._test_provider(parts[1])
         if method == "POST" and parts == ["keys"]:
             body = self._body()
             provider = str(body.get("provider", ""))
@@ -144,21 +156,57 @@ class Handler(BaseHTTPRequestHandler):
             stop_event=control.stop,
         )
         app.store.create_run(run_id, goal)
-        control.thread = run_in_background(app.store, run_id, team, goal, secret_values)
+        control.team, control.secrets = team, secret_values
+        control.thread = run_in_background(app.store, run_id, team, lambda: team.run(goal), secret_values)
         app.runs[run_id] = control
         self._send_json(201, {"id": run_id})
 
     def _human_message(self, run_id):
         app = self.server.app
         control = app.runs.get(run_id)
-        if control is None or not control.thread.is_alive():
-            return self._send_json(409, {"error": "this run has finished"})
+        if control is None:
+            return self._send_json(409, {"error": "this run cannot be continued; the server was restarted since it ran"})
         text = str(self._body().get("text", "")).strip()[:MAX_TEXT]
         if not text:
             raise ValueError("the message is empty")
-        control.human.put(text)
+        if control.thread.is_alive():
+            control.human.put(text)
+            app.store.add_event(run_id, "human", {"text": text})
+            return self._send_json(202, {"resumed": False})
+        # The run has ended: continue it with the same agents and their histories.
+        if self._active_runs() >= app.max_active_runs:
+            return self._send_json(429, {"error": "too many runs are running; wait for one to finish or stop one"})
+        app.store.resume_run(run_id)
         app.store.add_event(run_id, "human", {"text": text})
-        self._send_json(202, {"ok": True})
+        control.stop.clear()
+        control.thread = run_in_background(
+            app.store, run_id, control.team, lambda: control.team.continue_run(text), control.secrets
+        )
+        self._send_json(202, {"resumed": True})
+
+    def _active_runs(self):
+        return sum(1 for control in self.server.app.runs.values() if control.thread.is_alive())
+
+    def _test_provider(self, name):
+        app = self.server.app
+        body = self._body()
+        spec = body.get("spec")
+        if spec is None:
+            defaults = default_config()["providers"]
+            if name not in defaults:
+                raise ValueError(f"unknown provider {name!r}")
+            spec = defaults[name]
+        model = str(body.get("model", "")).strip()
+        if not model:
+            raise ValueError("choose a model to test with")
+        api_key = app.vault.get(name) or os.environ.get(spec.get("api_key_env", ""), "")
+        if not api_key:
+            raise ValueError(f"no key for {name!r} yet")
+        try:
+            sample = check_provider(name, spec, api_key, model)
+        except ProviderError as error:
+            return self._send_json(400, {"error": redact(str(error), [api_key])})
+        self._send_json(200, {"ok": True, "reply": sample})
 
     def _stop(self, run_id):
         control = self.server.app.runs.get(run_id)
@@ -185,6 +233,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 if not rows:
                     if run["status"] in FINISHED:
+                        # Tells the page the stream is truly over. A status event alone is not enough: a
+                        # continued run has an older "done" status earlier in its history.
+                        self.wfile.write(b"event: end\ndata: {}\n\n")
+                        self.wfile.flush()
                         return
                     if not store.wait_for_change(version, KEEPALIVE_SECONDS):
                         self.wfile.write(b": keepalive\n\n")
@@ -231,6 +283,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if body is not None:
             self.wfile.write(body)
+
+
+def _env_keys():
+    """Which default providers have their key in the environment. Only a yes or no, never the key."""
+    return {
+        name: bool(os.environ.get(spec["api_key_env"]))
+        for name, spec in default_config()["providers"].items()
+        if spec.get("api_key_env")
+    }
 
 
 def serve(port=8765, data_dir="data"):

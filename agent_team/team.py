@@ -86,7 +86,7 @@ def context_view(history, window=HISTORY_WINDOW):
 
 
 class Team:
-    """Runs agents one turn at a time. self.status records why the run ended."""
+    """Runs agents one turn at a time. self.status records why the last run or continuation ended."""
 
     def __init__(
         self,
@@ -128,14 +128,36 @@ class Team:
         self.pending_answer = None
 
     def run(self, goal):
-        """Work on a goal. Returns the answer if the team finished, otherwise None."""
+        """Start work on a goal. Returns the answer if the team finished, otherwise None."""
         self.goal = goal
+        self.emit(
+            "roster",
+            lead=self.lead,
+            verifier=self.verifier,
+            max_tokens=self.max_tokens,
+            members=[
+                {"name": agent.name, "role": agent.role, "model": agent.model, "provider": agent.provider.name}
+                for agent in self.agents.values()
+            ],
+        )
+        self._reset()
+        self._enqueue(self.lead, f"From the user:\n{goal}")
+        return self._loop()
+
+    def continue_run(self, text):
+        """Continue after the run ended. Every agent keeps its history, so the team picks up where it left off."""
+        self._reset()
+        self._enqueue(self.lead, f"From the user, as a follow-up:\n{text}")
+        return self._loop()
+
+    def _reset(self):
         self.inboxes = {name: [] for name in self.agents}
         self.ready = deque()
         self.silent_turns = {name: 0 for name in self.agents}
         self.pending_answer = None
         self.status = "running"
-        self._enqueue(self.lead, f"From the user:\n{goal}")
+
+    def _loop(self):
         started = self.clock()
         recent = deque(maxlen=STALL_REPEATS)
         turns = 0
@@ -156,11 +178,13 @@ class Team:
             agent = self.agents[name]
             agent.history.append({"role": "user", "text": "\n\n".join(self.inboxes[name])})
             self.inboxes[name] = []
+            self.emit("agent", name=name, state="thinking")
             reply = self._call(agent)
             if reply is None:
                 return self._finish("stopped")
             turns += 1
             self.tokens_used += reply.tokens
+            self.emit("agent", name=name, state="idle")
             self.emit("turn", agent=name, tokens=reply.tokens, total_tokens=self.tokens_used, truncated=reply.truncated)
             agent.history.append({"role": "assistant", "text": reply.text, "tool_calls": reply.tool_calls})
 

@@ -21,6 +21,9 @@ python -m agent_team serve            # http://127.0.0.1:8765
 ```
 
 The command prints a link with a session token. Open it in your browser. The page lets you:
+- Build the team with a form: member names, roles, providers, and models, plus a verifier and limits. The raw JSON is under "Advanced". Start is disabled until the team is ready, and the page says what is missing.
+- Test a key with one tiny request, using the model of a team member that uses that provider.
+- Continue a finished run by sending a message. The agents keep their history, as long as the server has not restarted.
 - Enter API keys. They stay on the server, in memory, unless you tick "save encrypted". Saved keys are encrypted with a master key in `~/.config/agent_team/master.key` (override with `AGENT_TEAM_MASTER_KEY_FILE`). Back up that file. Without it, saved keys cannot be read and must be entered again.
 - Edit the team as JSON, enter a goal, and start a run.
 - Watch messages, token use, and the final answer stream in live.
