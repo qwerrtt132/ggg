@@ -671,6 +671,20 @@ class TranscriptTests(unittest.TestCase):
         self.assertIn("## Final answer\n\nhello", text)
         self.assertIn("*Run ended: done*", text)
 
+    def test_markdown_shows_plans_and_replans(self):
+        from agent_team.transcript import to_markdown
+
+        run = {"goal": "g", "status": "done", "created_at": 0, "finished_at": 1}
+        events = [
+            {"kind": "plan", "data": {"text": "1. draft"}},
+            {"kind": "replan", "data": {"count": 1, "limit": 2, "reason": "no new progress for 4 turns"}},
+        ]
+
+        text = to_markdown(run, events)
+        self.assertIn("**Plan updated**", text)
+        self.assertIn("> 1. draft", text)
+        self.assertIn("1 of 2", text)
+
     def test_json_keeps_every_event(self):
         import json as json_module
         from agent_team.transcript import to_json

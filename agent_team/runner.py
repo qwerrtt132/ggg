@@ -7,7 +7,7 @@ import threading
 from pathlib import Path
 
 from .providers import ProviderError, build_provider
-from .team import Agent, Team
+from .team import DEFAULT_MAX_REPLANS, DEFAULT_STALL_TURNS, Agent, Team
 from .tools import GROUPS
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "default_team.json"
@@ -62,6 +62,13 @@ def _member_tools(spec, registry):
     if groups and registry is None:
         raise ConfigError(f"{spec['name']!r} asks for tools, but this run has no workspace for them")
     return [tool for group in groups for tool in GROUPS[group]]
+
+
+def _small_int(config, key, default, low, high):
+    value = config.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
+        raise ConfigError(f"{key} must be a whole number from {low} to {high}")
+    return value
 
 
 def _flag(config, key):
@@ -128,6 +135,8 @@ def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None, save
         max_seconds=config.get("max_seconds", 600),
         max_tokens=config.get("max_tokens", DEFAULT_MAX_TOKENS),
         step_mode=_flag(config, "step_mode"),
+        max_replans=_small_int(config, "max_replans", DEFAULT_MAX_REPLANS, 0, 5),
+        stall_turns=_small_int(config, "stall_turns", DEFAULT_STALL_TURNS, 2, 20),
         emit=emit,
         human_inbox=human_inbox,
         stop_event=stop_event,

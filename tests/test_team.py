@@ -83,7 +83,7 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(team.status, "done")
         self.assertEqual(writer.calls[0][-1]["text"], "From lead:\ndraft the intro")
         self.assertEqual(lead.calls[1][-1]["text"], "From writer:\nhere is the intro")
-        self.assertEqual(lead.tools[0], ["send_message", "finish"])
+        self.assertEqual(lead.tools[0], ["send_message", "finish", "update_plan"])
         self.assertEqual(writer.tools[0], ["send_message"])
 
     def test_teammates_cannot_use_lead_only_tools(self):
@@ -140,7 +140,7 @@ class TeamTests(unittest.TestCase):
 
     def test_identical_turns_are_a_stall(self):
         lead = ScriptedProvider(*[reply(call("send_message", to="ghost", message="same")) for _ in range(3)])
-        team = Team([Agent("lead", "plans", lead, "m")], lead="lead", max_turns=10)
+        team = Team([Agent("lead", "plans", lead, "m")], lead="lead", max_turns=10, max_replans=0)
 
         self.assertIsNone(team.run("goal"))
         self.assertEqual(team.status, "stalled")
@@ -152,7 +152,7 @@ class TeamTests(unittest.TestCase):
             reply(call("send_message", to="ghost", message=base + ".")),
             reply(call("send_message", to="ghost", message=base + "!")),
         )
-        team = Team([Agent("lead", "plans", lead, "m")], lead="lead", max_turns=10)
+        team = Team([Agent("lead", "plans", lead, "m")], lead="lead", max_turns=10, max_replans=0)
 
         self.assertIsNone(team.run("goal"))
         self.assertEqual(team.status, "stalled")
@@ -463,6 +463,63 @@ class StepModeTests(unittest.TestCase):
         worker.join(5)
 
         self.assertEqual(team.status, "stopped")
+
+
+class ReplanTests(unittest.TestCase):
+    def test_repeated_turns_trigger_a_replan_before_the_run_ends(self):
+        events = []
+        lead = ScriptedProvider(
+            *[reply(call("send_message", to="ghost", message="same")) for _ in range(3)],
+            reply(call("update_plan", plan="ask the writer first")),
+            reply(call("finish", answer="ok")),
+        )
+        team = Team([Agent("lead", "plans", lead, "m")], lead="lead", max_replans=1, emit=lambda kind, **data: events.append((kind, data)))
+
+        self.assertEqual(team.run("goal"), "ok")
+        self.assertEqual(team.status, "done")
+        replans = [data for kind, data in events if kind == "replan"]
+        self.assertEqual([replan["count"] for replan in replans], [1])
+        self.assertIn("The team has stalled", lead.calls[3][-1]["text"])
+
+    def test_no_progress_for_several_turns_is_a_stall(self):
+        lead = ScriptedProvider(*[reply(call("send_message", to="ghost", message=f"try {index}")) for index in range(4)])
+        team = Team([Agent("lead", "plans", lead, "m")], lead="lead", max_replans=0, stall_turns=2)
+
+        self.assertIsNone(team.run("goal"))
+        self.assertEqual(team.status, "stalled")
+        self.assertEqual(len(lead.calls), 2)
+
+    def test_replans_are_capped(self):
+        lead = ScriptedProvider(*[reply(call("send_message", to="ghost", message="same")) for _ in range(6)])
+        team = Team([Agent("lead", "plans", lead, "m")], lead="lead", max_replans=1, max_turns=20)
+
+        self.assertIsNone(team.run("goal"))
+        self.assertEqual(team.status, "stalled")
+        self.assertEqual(team.replans_used, 1)
+        self.assertEqual(len(lead.calls), 6)
+
+    def test_the_plan_is_kept_and_shown_again_on_a_replan(self):
+        events = []
+        lead = ScriptedProvider(
+            reply(call("update_plan", plan="1. draft 2. review")),
+            *[reply(call("send_message", to="ghost", message="same")) for _ in range(3)],
+            reply(call("finish", answer="ok")),
+        )
+        team = Team([Agent("lead", "plans", lead, "m")], lead="lead", max_replans=1, emit=lambda kind, **data: events.append((kind, data)))
+
+        team.run("goal")
+        self.assertIn(("plan", {"text": "1. draft 2. review", "turn": 1}), events)
+        self.assertIn("1. draft 2. review", lead.calls[-1][-1]["text"])
+
+    def test_a_replan_cannot_be_triggered_by_a_teammate_and_the_plan_tool_is_lead_only(self):
+        lead = ScriptedProvider(reply(call("send_message", to="writer", message="go")), reply(call("finish", answer="ok")))
+        writer = ScriptedProvider(reply(call("update_plan", plan="my plan")), reply(call("send_message", to="lead", message="done")))
+        team = Team([Agent("lead", "plans", lead, "m"), Agent("writer", "writes", writer, "m")], lead="lead")
+
+        self.assertEqual(team.run("goal"), "ok")
+        self.assertEqual(team.snapshot()["plan"], None)
+        self.assertNotIn("update_plan", [tool["name"] for tool in team._tools_for("writer")])
+        self.assertIsNone(team.plan)
 
 
 class ApprovalTests(unittest.TestCase):

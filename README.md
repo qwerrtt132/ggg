@@ -85,6 +85,8 @@ Running code is not available. Model-written code would run on your machine, so 
 - If the config names a `verifier`, the lead's `finish` goes to that agent first. The run ends only when it passes the answer. Otherwise the lead gets the feedback and revises.
 - An agent that used a file or fetch tool gets another turn to act on the result.
 - An agent whose reply has no tool call is told to use a tool. Two such replies in a row end the run.
+- The lead can write the team's plan with `update_plan`. The plan is saved with each checkpoint.
+- A run is stalled when the same turns keep repeating, or when several turns in a row produce nothing new (a call that succeeds with arguments the run has not used before counts as new). A stalled run is not ended straight away. The lead gets a progress ledger (goal, reason, the current plan, recent messages) and is asked for a new plan. Each run gets `max_replans` of these (default 2, from 0 to 5). After that the run ends as `stalled`. `stall_turns` sets how many idle turns count as a stall (default 4, from 2 to 20).
 - The model's output limit can cut a reply short. The agent is told to keep messages shorter, and the feed marks the turn.
 - Rate limits and server errors are retried with backoff (up to 4 attempts, honoring `Retry-After`).
 - Only the most recent 16 history items are sent to the model, so long runs cost less.

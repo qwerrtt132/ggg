@@ -183,6 +183,22 @@ class ConfigToolTests(unittest.TestCase):
         unlimited, _ = build_team(config, lambda name: "key", emit=None)
         self.assertIsNone(unlimited.max_tokens)
 
+    def test_replan_settings_are_checked(self):
+        config = self.config([])
+        config["max_replans"] = 9
+        with self.assertRaisesRegex(ConfigError, "max_replans"):
+            build_team(config, lambda name: "key", emit=None)
+
+        config = self.config([])
+        config["stall_turns"] = 1
+        with self.assertRaisesRegex(ConfigError, "stall_turns"):
+            build_team(config, lambda name: "key", emit=None)
+
+        config = self.config([])
+        config["max_replans"] = 0
+        team, _ = build_team(config, lambda name: "key", emit=None)
+        self.assertEqual(team.max_replans, 0)
+
     def test_a_valid_tool_group_gives_the_member_its_tools(self):
         team, _ = build_team(self.config(["files"]), lambda name: "key", emit=None, tools=build_tools(tempfile.mkdtemp()))
 

@@ -3,7 +3,7 @@ const token = new URLSearchParams(location.search).get("token") || "";
 history.replaceState(null, "", "/");
 
 const FINISHED = new Set(["done", "idle", "max_turns", "timeout", "token_budget", "stalled", "stopped", "failed", "interrupted", "no_progress"]);
-const EVENT_KINDS = ["roster", "agent", "message", "turn", "human", "final", "error", "status", "rewind", "branched", "approval", "approval_result", "tool", "paused", "resumed", "step_mode"];
+const EVENT_KINDS = ["roster", "agent", "message", "turn", "human", "final", "error", "status", "rewind", "branched", "approval", "approval_result", "tool", "paused", "resumed", "step_mode", "plan", "replan"];
 const NAME_RULE = /^[a-z][a-z0-9_-]{0,31}$/;
 const DRAFT_KEY = "agent-team-draft";
 const TOOL_GROUPS = [
@@ -751,6 +751,13 @@ function render(kind, data) {
     item.append(el("div", `Rewound to turn ${data.to_turn}. Later turns were dropped from the checkpoints.`, "who"));
   } else if (kind === "branched") {
     item.append(el("div", `Branched from another run at turn ${data.turn}.`, "who"));
+  } else if (kind === "plan") {
+    item.append(el("div", "Plan updated", "who"), el("div", data.text, "text"));
+  } else if (kind === "replan") {
+    item.append(
+      el("div", `The team stalled, so the lead was asked for a new plan (${data.count} of ${data.limit}).`, "who"),
+      el("div", `Why: ${data.reason}`, "muted")
+    );
   }
   feed.append(item);
   if (nearBottom || kind === "human") item.scrollIntoView({ block: "end" });

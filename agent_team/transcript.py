@@ -30,6 +30,10 @@ def to_markdown(run, events):
             lines += ["## Final answer", "", data["answer"], ""]
         elif kind == "error":
             lines += [f"**Error:** {data['message']}", ""]
+        elif kind == "plan":
+            lines += ["**Plan updated**", "", _quote(data["text"]), ""]
+        elif kind == "replan":
+            lines += [f"*The team stalled, so the lead was asked for a new plan ({data['count']} of {data['limit']}). Why: {data['reason']}*", ""]
         elif kind == "rewind":
             lines += [f"*Rewound to turn {data['to_turn']}. The turns after it were dropped.*", ""]
         elif kind == "branched":

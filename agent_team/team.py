@@ -12,6 +12,8 @@ from .providers import ToolCall
 STALL_REPEATS = 3  # this many near-identical turns in a row counts as stuck
 STALL_SIMILARITY = 0.9
 STALL_MIN_LENGTH = 80  # shorter turns are compared exactly, so "try 1" and "try 2" are not the same turn
+DEFAULT_MAX_REPLANS = 2  # how many times a stalled run may get a new plan before it ends
+DEFAULT_STALL_TURNS = 4  # turns in a row without progress that count as a stall
 SILENT_TURNS_LIMIT = 2  # turns without any tool call before the run gives up
 HISTORY_WINDOW = 16  # recent items sent to the model; older ones are dropped
 POLL_SECONDS = 0.05
@@ -60,6 +62,15 @@ FINISH = {
         "type": "object",
         "properties": {"answer": {"type": "string"}},
         "required": ["answer"],
+    },
+}
+UPDATE_PLAN = {
+    "name": "update_plan",
+    "description": "Lead only. Write or replace the team's plan: the steps, who does each, and what done looks like.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"plan": {"type": "string"}},
+        "required": ["plan"],
     },
 }
 SUBMIT_VERDICT = {
@@ -149,6 +160,8 @@ class Team:
         extra_tools=None,
         on_live=None,
         step_mode=False,
+        max_replans=DEFAULT_MAX_REPLANS,
+        stall_turns=DEFAULT_STALL_TURNS,
     ):
         names = [agent.name for agent in agents]
         if len(set(names)) != len(names):
@@ -175,6 +188,13 @@ class Team:
         self.turn_no = 0  # turns taken so far, across runs and continuations; checkpoints are keyed by it
         self.pending_approvals = {}  # call id -> _Waiting
         self.step_mode = bool(step_mode)
+        self.max_replans = max_replans
+        self.stall_turns = stall_turns
+        self.plan = None
+        self.replans_used = 0
+        self._idle_turns = 0
+        self._seen_calls = set()
+        self._recent_messages = deque(maxlen=3)
         self._gate = threading.Event()
         self._paused = False
         self._deadline = float("inf")
@@ -204,6 +224,10 @@ class Team:
     def run(self, goal):
         """Start work on a goal. Returns the answer if the team finished, otherwise None."""
         self.goal = goal
+        self.plan = None
+        self.replans_used = 0
+        self._idle_turns = 0
+        self._seen_calls = set()
         self.announce()
         self._reset()
         self._enqueue(self.lead, f"From the user:\n{goal}")
@@ -283,7 +307,8 @@ class Team:
                 self._enqueue(name, "System: your last reply was cut off by the output limit. Keep messages shorter.")
             if failed:
                 self._enqueue(name, "System: some tool calls failed. Read the results above, fix them, and try again.")
-            elif any(call.name in self.extra_tools for call in reply.tool_calls):
+            elif any(call.name not in ("send_message", "finish", "submit_verdict") for call in reply.tool_calls):
+                # Work tools (files, fetch, approved calls, the plan) need a turn to act on their results.
                 self._enqueue(name, "System: the tool results above are ready. Continue your work.")
             if reply.tool_calls:
                 self.silent_turns[name] = 0
@@ -298,14 +323,52 @@ class Team:
                 )
             fingerprint = normalize(reply.text + " " + " ".join(f"{c.name} {c.arguments}" for c in reply.tool_calls))
             recent.append(fingerprint)
-            if len(recent) == STALL_REPEATS and all(same_turn(recent[0], other) for other in recent):
-                return self._finish("stalled")
+            if self._made_progress(reply.tool_calls, results):
+                self._idle_turns = 0
+            else:
+                self._idle_turns += 1
+            repeated = len(recent) == STALL_REPEATS and all(same_turn(recent[0], other) for other in recent)
+            if repeated or self._idle_turns >= self.stall_turns:
+                if self.replans_used >= self.max_replans:
+                    return self._finish("stalled")
+                self._replan("the same turns keep repeating" if repeated else f"no new progress for {self._idle_turns} turns")
+                recent.clear()
+                self._idle_turns = 0
             if self.step_mode and not self._wait_for_step():
                 return self._finish("stopped")
 
     def _finish(self, status, answer=None):
         self.status = status
         return answer
+
+    def _made_progress(self, calls, results):
+        """A successful call with arguments the run has not used before counts as progress."""
+        progressed = False
+        for call, result in zip(calls, results):
+            if result["is_error"]:
+                continue
+            signature = f"{call.name} {sorted(call.arguments.items(), key=lambda item: str(item[0]))}"
+            if signature not in self._seen_calls:
+                self._seen_calls.add(signature)
+                progressed = True
+        return progressed
+
+    def _replan(self, reason):
+        """The lead gets a progress ledger and is asked for a new plan. Each run gets a limited number."""
+        self.replans_used += 1
+        self.emit("replan", count=self.replans_used, limit=self.max_replans, reason=reason)
+        recent = [f"- {m['sender']} → {m['recipient']}: {m['text'][:120]}" for m in self._recent_messages] or ["- none yet"]
+        ledger = [
+            "System: The team has stalled. Progress ledger:",
+            f"- Goal: {self.goal}",
+            f"- Why this was flagged: {reason}",
+            f"- Turns without new progress: {self._idle_turns}",
+            f"- Current plan: {self.plan or 'none recorded yet'}",
+            "- Latest messages:",
+            *recent,
+            "Write a new plan with update_plan, then give the next steps with send_message. Do not repeat the steps that did not work.",
+        ]
+        self._enqueue(self.lead, "\n".join(ledger))
 
     def set_step_mode(self, enabled):
         """In step mode the run pauses after every turn until step_next() is called. Turning it off resumes."""
@@ -355,6 +418,8 @@ class Team:
             "silent_turns": dict(self.silent_turns),
             "pending_answer": self.pending_answer,
             "tokens_used": self.tokens_used,
+            "plan": self.plan,
+            "replans_used": self.replans_used,
         }
 
     def restore(self, snapshot):
@@ -368,6 +433,8 @@ class Team:
         self.silent_turns = {name: snapshot.get("silent_turns", {}).get(name, 0) for name in self.agents}
         self.pending_answer = snapshot.get("pending_answer")
         self.tokens_used = snapshot.get("tokens_used", 0)
+        self.plan = snapshot.get("plan")
+        self.replans_used = snapshot.get("replans_used", 0)
 
     def _checkpoint(self):
         if self.save_state is not None:
@@ -418,7 +485,7 @@ class Team:
         if name == self.verifier:
             base = [SEND_MESSAGE, SUBMIT_VERDICT]
         elif name == self.lead:
-            base = [SEND_MESSAGE, FINISH]
+            base = [SEND_MESSAGE, FINISH, UPDATE_PLAN]
         else:
             base = [SEND_MESSAGE]
         extra = [self.extra_tools[tool][0] for tool in self.agents[name].tools if tool in self.extra_tools]
@@ -506,6 +573,13 @@ class Team:
                 return "The message is empty.", True, None
             self._send(sender, recipient, message)
             return f"Delivered to {recipient}.", False, None
+        if call.name == "update_plan":
+            plan = str(args.get("plan", "")).strip()
+            if not plan:
+                return "The plan is empty.", True, None
+            self.plan = plan
+            self.emit("plan", text=plan, turn=self.turn_no)
+            return "Plan recorded.", False, None
         if call.name == "finish":
             answer = str(args.get("answer", "")).strip()
             if not answer:
@@ -550,6 +624,7 @@ class Team:
 
     def _send(self, sender, recipient, text):
         self.emit("message", sender=sender, recipient=recipient, text=text)
+        self._recent_messages.append({"sender": sender, "recipient": recipient, "text": text})
         self._enqueue(recipient, f"From {sender}:\n{text}")
 
     def _teammates(self, sender):
