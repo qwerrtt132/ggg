@@ -28,7 +28,16 @@
       "provider": "anthropic",
       "model": "claude-haiku-5-5",
       "role": "Review drafts for mistakes and weak points, and send the writer concrete fixes."
+    },
+    {
+      "name": "verifier",
+      "provider": "anthropic",
+      "model": "claude-haiku-5-5",
+      "role": "Check the lead's final answer against the user's goal before it is delivered."
     }
   ],
-  "max_turns": 30
+  "verifier": "verifier",
+  "max_turns": 30,
+  "max_seconds": 600,
+  "max_tokens": 200000
 }

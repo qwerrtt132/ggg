@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent team</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Agent team</h1>
+    <p id="notice" class="error" role="alert"></p>
+  </header>
+  <main>
+    <section class="panel">
+      <h2>API keys</h2>
+      <p class="muted">Keys stay on this server. They are never shown again in full. They live in memory only, unless you choose to save them encrypted.</p>
+      <form id="key-form">
+        <label>Provider name
+          <input id="key-provider" placeholder="anthropic" required pattern="[a-z0-9_-]{1,40}" autocomplete="off">
+        </label>
+        <label>API key
+          <input id="key-value" type="password" required autocomplete="off">
+        </label>
+        <label class="inline">
+          <input id="key-persist" type="checkbox"> save encrypted on this machine
+        </label>
+        <button type="submit">Save key</button>
+      </form>
+      <ul id="key-list" class="list"></ul>
+    </section>
+
+    <section class="panel">
+      <h2>New run</h2>
+      <label>Team config (JSON)
+        <textarea id="config" rows="16" spellcheck="false" class="mono"></textarea>
+      </label>
+      <label>Goal
+        <textarea id="goal" rows="3" placeholder="What should the team produce?"></textarea>
+      </label>
+      <button id="start" type="button">Start run</button>
+      <h2>Past runs</h2>
+      <ul id="run-list" class="list"></ul>
+    </section>
+
+    <section class="panel wide">
+      <h2 id="run-title">No run selected</h2>
+      <p id="run-status" class="muted"></p>
+      <ol id="feed" class="feed"></ol>
+      <form id="human-form" class="inline-form">
+        <input id="human-text" placeholder="Send the lead a message during the run" autocomplete="off">
+        <button type="submit">Send</button>
+        <button id="stop" type="button" class="secondary">Stop run</button>
+      </form>
+    </section>
+  </main>
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>
