@@ -1,6 +1,11 @@
 # Agent team: implementation plan
 
-Status: phase 1 in progress. Owner: the repo's maintainer. Last updated with the phase 1 start.
+Status: phase 1 done, 37 tests passing. Phase 2 has not started. Owner: the repo's maintainer.
+
+Phase 1 notes from implementation:
+- The stall check compares short turns exactly and only applies similarity to turns of 80 characters or more. Short messages like "try 1" and "try 2" are different turns.
+- Stop returns at once, but the abandoned model call keeps running until the provider finishes or times out.
+- Plain text is not delivered, so the README and the agents' prompts both say to use tools.
 
 ## Goal
 

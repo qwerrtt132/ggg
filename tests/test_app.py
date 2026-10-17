@@ -18,11 +18,12 @@ from agent_team.store import Store
 
 
 class StubProvider(BaseHTTPRequestHandler):
-    """Answers every chat completion with a final answer, like an OpenAI-compatible server would."""
+    """Answers every chat completion by calling the finish tool, like a tool-calling OpenAI-compatible server."""
 
     def do_POST(self):
         self.rfile.read(int(self.headers["content-length"]))
-        payload = json.dumps({"choices": [{"message": {"content": "FINAL: hello from stub"}}]}).encode()
+        finish = {"id": "call_1", "type": "function", "function": {"name": "finish", "arguments": json.dumps({"answer": "hello from stub"})}}
+        payload = json.dumps({"choices": [{"message": {"content": None, "tool_calls": [finish]}, "finish_reason": "tool_calls"}]}).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(payload)))
@@ -164,6 +165,17 @@ class ServerTests(unittest.TestCase):
         self.assertIn("hello from stub", events)
         self.assertIn('{"status": "done"}', events)
         self.assertNotIn("sk-test-1234", events)
+
+    def test_concurrent_runs_are_capped(self):
+        self.server.app.max_active_runs = 0
+        config = {
+            "providers": {"stub": {"type": "openai_compatible", "base_url": self.stub_base}},
+            "lead": {"name": "lead", "provider": "stub", "model": "m", "role": "answer"},
+            "teammates": [],
+        }
+        status, body = self.request("POST", "/api/runs", {"config": config, "goal": "say hi"})
+        self.assertEqual(status, 429)
+        self.assertIn("already running", json.loads(body)["error"])
 
     def test_saved_key_is_encrypted_on_disk(self):
         self.request("POST", "/api/keys", {"provider": "stub", "key": "sk-saved-9999", "persist": True})

@@ -45,10 +45,18 @@ python -m agent_team run team.json "Write a one-page guide to our release proces
 ### How a team works
 
 - The lead receives the goal. Agents take turns in the order their messages arrive.
-- An agent sends a message by starting a line with `TO <name>:`. The message runs until the next `TO` line.
-- The lead ends the run with a line starting with `FINAL:`.
-- If the config names a `verifier`, the lead's final answer goes to that agent first. Its reply must start with `VERDICT: PASS` before the run ends. Otherwise the lead gets the problems and revises.
-- Limits stop runaway runs, and the run status says which one applied: `max_turns`, `max_seconds` (`timeout`), `max_tokens` (`token_budget`), a repeated reply (`stalled`), `stopped`, or `idle` when no one has anything left to do.
+- Agents act only through tools. Plain text in a reply is not delivered to anyone.
+  - `send_message(to, message)`: every agent. The reply arrives later as a new message.
+  - `finish(answer)`: the lead only. Ends the run with the answer for you.
+  - `submit_verdict(passed, feedback)`: the verifier only.
+- If the config names a `verifier`, the lead's `finish` goes to that agent first. The run ends only when it passes the answer. Otherwise the lead gets the feedback and revises.
+- An agent whose reply has no tool call is told to use a tool. Two such replies in a row end the run.
+- The model's output limit can cut a reply short. The agent is told to keep messages shorter, and the feed marks the turn.
+- Rate limits and server errors are retried with backoff (up to 4 attempts, honoring `Retry-After`).
+- Only the most recent 16 history items are sent to the model, so long runs cost less.
+- At most 3 runs execute at once. Stop takes effect immediately, even during a model call.
+- Limits stop runaway runs, and the run status says which one applied: `max_turns`, `max_seconds` (`timeout`), `max_tokens` (`token_budget`), a repeated turn (`stalled`), `no_progress`, `stopped`, `failed`, `idle` when no one has anything left to do, or `interrupted` after a restart.
+- The `openai_compatible` provider needs a server with tool calling. Plain chat-only servers will fail.
 
 ### Tests
 

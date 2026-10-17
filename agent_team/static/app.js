@@ -100,7 +100,8 @@ function render(kind, data, runId) {
   if (kind === "message") {
     item.append(el("div", `${data.sender} → ${data.recipient}`, "who"), el("div", data.text, "text"));
   } else if (kind === "turn") {
-    item.append(el("div", `${data.agent} used ${data.tokens} tokens (run total ${data.total_tokens})`, "muted"));
+    const cut = data.truncated ? " · reply cut off by the output limit" : "";
+    item.append(el("div", `${data.agent} used ${data.tokens} tokens (run total ${data.total_tokens})${cut}`, "muted"));
   } else if (kind === "human") {
     item.append(el("div", "You", "who"), el("div", data.text, "text"));
   } else if (kind === "final") {

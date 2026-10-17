@@ -26,6 +26,7 @@ STATIC_FILES = {
 PROVIDER_NAME = re.compile(r"^[a-z0-9_-]{1,40}$")
 MAX_BODY = 1_000_000
 MAX_TEXT = 10_000
+MAX_ACTIVE_RUNS = 3
 KEEPALIVE_SECONDS = 15
 SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'",
@@ -43,10 +44,11 @@ class RunControl:
 
 
 class App:
-    def __init__(self, store, vault, token):
+    def __init__(self, store, vault, token, max_active_runs=MAX_ACTIVE_RUNS):
         self.store = store
         self.vault = vault
         self.token = token
+        self.max_active_runs = max_active_runs
         self.runs = {}  # run id -> RunControl, for runs started by this process
 
 
@@ -127,6 +129,11 @@ class Handler(BaseHTTPRequestHandler):
         goal = str(body.get("goal", "")).strip()
         if not goal or len(goal) > MAX_TEXT:
             raise ValueError(f"the goal must be 1 to {MAX_TEXT} characters")
+        active = sum(1 for control in app.runs.values() if control.thread.is_alive())
+        if active >= app.max_active_runs:
+            return self._send_json(
+                429, {"error": f"{active} runs are already running; wait for one to finish or stop one"}
+            )
         run_id = uuid.uuid4().hex
         control = RunControl()
         team, secret_values = build_team(
