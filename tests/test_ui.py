@@ -8,10 +8,13 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 import urllib.request
 from pathlib import Path
 from unittest import mock
+
+from http.server import BaseHTTPRequestHandler
 
 from test_app import StubProvider, start_http_server
 
@@ -31,6 +34,32 @@ def find_chrome():
         return configured
     matches = sorted(glob.glob("/opt/pw-browsers/chromium-*/chrome-linux/chrome"))
     return matches[-1] if matches else None
+
+
+class SlowStream(BaseHTTPRequestHandler):
+    """Streams a reply in pieces, a little apart, and then finishes. The page is checked while the text is still arriving."""
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers["content-length"]))
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.end_headers()
+        for piece in ("Drafting the answer", " one piece at a time", " so you can watch it."):
+            self._send({"choices": [{"delta": {"content": piece}}]})
+            time.sleep(0.8)
+        finish = {"index": 0, "id": "call_slow", "function": {"name": "finish", "arguments": json.dumps({"answer": "streamed"})}}
+        self._send({"choices": [{"delta": {"tool_calls": [finish]}}]})
+        self._send({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]})
+        self._send({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}})
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+
+    def _send(self, chunk):
+        self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+        self.wfile.flush()
+
+    def log_message(self, *args):
+        pass
 
 
 @unittest.skipUnless(sync_playwright and find_chrome(), "needs Playwright and a Chromium binary")
@@ -315,6 +344,34 @@ class UiTests(unittest.TestCase):
         page.select_option("#run-filter", "done")
         expect(page.locator("#run-list li")).to_have_count(1)
         expect(page.locator("#run-list")).to_contain_text("dashboard summary")
+        self.assertEqual(self.errors, [])
+
+
+    def test_the_reply_streams_into_its_card_before_the_run_finishes(self):
+        slow = start_http_server(("127.0.0.1", 0), SlowStream)
+        self.addCleanup(slow.server_close)
+        self.addCleanup(slow.shutdown)
+        team = {
+            "providers": {"stub": {"type": "openai_compatible", "base_url": f"http://127.0.0.1:{slow.server_port}"}},
+            "lead": {"name": "lead", "provider": "stub", "model": "m", "role": "answer the user"},
+            "teammates": [],
+        }
+        page = self.open_page(team=team)
+        page.click("#keys-details summary")
+        page.fill("#key-provider", "stub")
+        page.fill("#key-value", "sk-ui-stream-7777")
+        page.click("#keys-details button[type=submit]")
+        expect(page.locator("#notice")).to_have_text("Key saved.")
+
+        page.fill("#goal", "stream a reply")
+        page.click("#start")
+
+        preview = page.locator("#cards .preview")
+        expect(preview).to_contain_text("Drafting the answer", timeout=5000)
+        self.assertNotIn("streamed", page.locator("#feed").inner_text())  # the answer has not come in yet
+        expect(preview).to_contain_text("one piece at a time", timeout=5000)
+        expect(page.locator("#run-status")).to_contain_text("Status: done", timeout=15000)
+        expect(page.locator("#feed")).to_contain_text("streamed")
         self.assertEqual(self.errors, [])
 
 
