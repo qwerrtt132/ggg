@@ -338,3 +338,49 @@ class PackageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PresetVersionTests(ServerTestCase):
+    def test_a_preset_with_an_unknown_config_version_is_refused_when_saved(self):
+        config = self.stub_team()
+        config["version"] = 2
+        status, body = self.call("POST", "/api/presets", {"name": "future", "config": config})
+
+        self.assertEqual(status, 400)
+        self.assertIn("config version 2 is not supported", json.loads(body)["error"])
+        self.assertNotIn("future", [preset["name"] for preset in self.store.list_presets()])
+
+    def test_a_preset_with_version_one_is_saved(self):
+        config = self.stub_team()
+        config["version"] = 1
+        status, _ = self.call("POST", "/api/presets", {"name": "current", "config": config})
+
+        self.assertEqual(status, 201)
+
+
+class LogRotationTests(unittest.TestCase):
+    def test_the_log_moves_aside_when_it_grows_past_its_limit(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "agent_team.log"
+        log = RunLog(path, max_bytes=300)
+
+        for run in range(20):
+            log.write("run_finished", run=f"r{run}", status="done")
+
+        rotated = Path(directory.name) / "agent_team.log.1"
+        self.assertTrue(rotated.is_file())
+        self.assertLessEqual(path.stat().st_size, 300)
+        self.assertIn('"run": "r19"', path.read_text())  # the newest line is always in the current file
+        self.assertTrue(all(json.loads(line) for line in rotated.read_text().splitlines()))
+
+    def test_only_one_old_log_is_kept(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "agent_team.log"
+        log = RunLog(path, max_bytes=100)
+
+        for run in range(50):
+            log.write("run_finished", run=f"r{run}", status="done")
+
+        self.assertEqual(sorted(p.name for p in Path(directory.name).iterdir()), ["agent_team.log", "agent_team.log.1"])

@@ -24,7 +24,7 @@ def default_config():
     return json.loads(DEFAULT_CONFIG_PATH.read_text())
 
 
-def _check_version(config):
+def check_version(config):
     version = config.get("version", CONFIG_VERSION)
     if version != CONFIG_VERSION:
         raise ConfigError(f"config version {version} is not supported; this app reads version {CONFIG_VERSION}")
@@ -119,7 +119,7 @@ def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None, save
     if not isinstance(config, dict):
         raise ConfigError("the team config must be a JSON object")
     refuse_secret_fields(config)
-    _check_version(config)
+    check_version(config)
     prices = _prices(config)
     try:
         lead_spec = config["lead"]

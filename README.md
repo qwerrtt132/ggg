@@ -113,7 +113,7 @@ Running code is not available. Model-written code would run on your machine, so 
 ### Operations
 
 - `GET /api/health` (with the session token) reports the version, whether the database answers, and how many runs are active. It returns 503 when the database does not answer.
-- `data/agent_team.log` is a log with one JSON object per line. A line is written when a run finishes, with its status and tokens, and when a run fails. Keys are replaced with `[redacted]` before a line is written. The log is not rotated.
+- `data/agent_team.log` is a log with one JSON object per line. A line is written when a run finishes, with its status and tokens, and when a run fails. Keys are replaced with `[redacted]` before a line is written. When the log passes 5 MB it moves to `agent_team.log.1`, which replaces any earlier copy, so at most two files are kept.
 
 ### Tests
 
@@ -129,6 +129,6 @@ GitHub Actions runs the suite on Python 3.10 and 3.13 (`.github/workflows/tests.
 
 - Only one server can use a data directory at a time. The lock is an OS file lock. It is not enforced on Windows, where you must run one server per data directory yourself.
 - Replies stream. The page shows the end of each agent's reply while it arrives. That live text is not saved, so after a reconnect it shows only what is streaming at that moment. The saved feed shows the full message once the turn ends.
-- Cost figures are estimates from the prices in the config. A config with a version other than 1 is refused when a run starts, including a preset that holds one.
+- Cost figures are estimates from the prices in the config. A config with a version other than 1 is refused when it is saved as a preset and when a run starts.
 - The `openai_compatible` provider needs a server with tool calling. Chat-only servers fail. Streaming also asks for token usage with `stream_options`. A server that rejects that option will fail the request.
 - The fetch tool checks every address a name resolves to, then connects to one of the checked addresses. It does not look the name up again, so a name that changes its address is not followed. Fetch still reads any public page an agent asks for, so do not treat it as a content filter.

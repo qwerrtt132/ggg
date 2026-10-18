@@ -327,3 +327,111 @@ class ConfigToolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TlsFetchTests(unittest.TestCase):
+    """HTTPS reads the page from the checked address, and checks the certificate against the host name."""
+
+    PUBLIC = "93.184.216.34"
+
+    @classmethod
+    def setUpClass(cls):
+        import datetime
+        import ssl
+
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+
+        cls.directory = tempfile.TemporaryDirectory()
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "secure.example")])
+        now = datetime.datetime.now(datetime.timezone.utc)
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(name)
+            .issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(days=1))
+            .not_valid_after(now + datetime.timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName("secure.example")]), critical=False)
+            .sign(key, hashes.SHA256())
+        )
+        cls.cert_path = Path(cls.directory.name) / "cert.pem"
+        key_path = Path(cls.directory.name) / "key.pem"
+        cls.cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+        key_path.write_bytes(
+            key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption())
+        )
+        server_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        server_context.load_cert_chain(cls.cert_path, key_path)
+        cls.server = HTTPServer(("127.0.0.1", 0), _Hops)
+        cls.server.socket = server_context.wrap_socket(cls.server.socket, server_side=True)
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.port = cls.server.server_port
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.directory.cleanup()
+
+    def setUp(self):
+        import ssl
+
+        env = mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"})
+        env.start()
+        self.addCleanup(env.stop)
+        self.connected = []
+        real_connect = socket.create_connection
+        real_context = ssl.create_default_context
+
+        def trusting_context(*args, **kwargs):
+            # The test certificate is not in the system store, so this context trusts it. Host name checks stay on.
+            context = real_context(*args, **kwargs)
+            context.load_verify_locations(self.cert_path)
+            return context
+
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            if host == "127.0.0.1":
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (host, port or 0))]
+            if host == "secure.example":
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (self.PUBLIC, port or 0))]
+            raise socket.gaierror(f"unknown host {host}")
+
+        def fake_connect(address, timeout=None, *args, **kwargs):
+            self.connected.append(address[0])
+            if address[0] == self.PUBLIC:
+                return real_connect(("127.0.0.1", self.port), timeout)
+            return real_connect(address, timeout)
+
+        for patcher in (
+            mock.patch("socket.getaddrinfo", side_effect=fake_getaddrinfo),
+            mock.patch("socket.create_connection", side_effect=fake_connect),
+            mock.patch("ssl.create_default_context", side_effect=trusting_context),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_https_reads_the_page_from_the_checked_address(self):
+        text = fetch(f"https://secure.example:{self.port}/")
+
+        self.assertIn("Title", text)
+        self.assertEqual(self.connected, [self.PUBLIC])
+
+    def test_a_certificate_for_another_name_is_refused(self):
+        import ssl
+
+        # A name the certificate does not cover must fail the check, even though the certificate is trusted.
+        real_getaddrinfo = socket.getaddrinfo
+
+        def other_name(host, port, *args, **kwargs):
+            if host == "wrong.example":
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (self.PUBLIC, port or 0))]
+            return real_getaddrinfo(host, port, *args, **kwargs)
+
+        with mock.patch("socket.getaddrinfo", side_effect=other_name):
+            with self.assertRaisesRegex(ToolError, "Hostname mismatch"):
+                fetch(f"https://wrong.example:{self.port}/")

@@ -19,7 +19,16 @@ from .keys import KeyVault, KeyVaultError
 from .locks import acquire_data_lock
 from .logs import RunLog
 from .providers import ProviderError
-from .runner import ConfigError, build_team, check_provider, default_config, redact, refuse_secret_fields, run_in_background
+from .runner import (
+    ConfigError,
+    build_team,
+    check_provider,
+    check_version,
+    default_config,
+    redact,
+    refuse_secret_fields,
+    run_in_background,
+)
 from .store import FINISHED, Store
 from .templates import TEMPLATES
 from .review import WorkspaceReview
@@ -431,6 +440,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(config, dict):
                 raise ValueError("a preset needs a team config")
             refuse_secret_fields(config)
+            check_version(config)  # a preset is a team config, so it must be one this app can read
             store.save_preset(name, config)
             return self._send_json(201, {"presets": store.list_presets()})
         if len(rest) == 1 and method == "GET":
