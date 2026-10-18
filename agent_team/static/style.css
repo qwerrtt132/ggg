@@ -281,3 +281,6 @@ summary { cursor: pointer; color: var(--muted); }
 .graph .edge { stroke: var(--muted); stroke-linecap: round; opacity: 0.7; }
 .graph .node { fill: hsl(var(--hue, 210) 60% 50%); }
 .graph .node-label { fill: #fff; font-size: 12px; font-weight: 600; }
+
+.login { max-width: 360px; margin: 12vh auto; padding: 0 16px; }
+.login label { display: grid; gap: 6px; margin-bottom: 12px; }

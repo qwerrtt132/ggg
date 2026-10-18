@@ -3,6 +3,8 @@
 import hmac
 import json
 import os
+from html import escape
+from http.cookies import SimpleCookie
 import queue
 import re
 import secrets
@@ -15,6 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import __version__
+from .auth import COOKIE_NAME, SESSION_SECONDS, OwnerAuth, public_settings
 from .keys import KeyVault, KeyVaultError
 from .locks import acquire_data_lock
 from .logs import RunLog
@@ -65,10 +68,11 @@ class RunControl:
 
 
 class App:
-    def __init__(self, store, vault, token, max_active_runs=MAX_ACTIVE_RUNS, workspaces=None, baselines=None, log=None):
+    def __init__(self, store, vault, token, max_active_runs=MAX_ACTIVE_RUNS, workspaces=None, baselines=None, log=None, auth=None):
         self.store = store
         self.vault = vault
         self.token = token
+        self.auth = auth  # set for the public site, where the owner signs in; None for a private server on this machine
         self.log = log  # a RunLog, or None to keep no log file
         if baselines is None and workspaces is not None:
             baselines = Path(workspaces).parent / "accepted"
@@ -90,10 +94,13 @@ class App:
 class Server(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, port, app):
-        super().__init__(("127.0.0.1", port), Handler)
+    def __init__(self, port, app, host="127.0.0.1"):
+        super().__init__((host, port), Handler)
         self.app = app
-        self.allowed_hosts = {f"127.0.0.1:{self.server_port}", f"localhost:{self.server_port}"}
+        if app.auth is not None:
+            self.allowed_hosts = {app.auth.public_host}
+        else:
+            self.allowed_hosts = {f"127.0.0.1:{self.server_port}", f"localhost:{self.server_port}"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -110,12 +117,14 @@ class Handler(BaseHTTPRequestHandler):
         self._dispatch("DELETE")
 
     def _dispatch(self, method):
-        if not self._local_request():
+        if not self._allowed_request(method):
             return self._send_json(403, {"error": "this server only answers requests from its own page"})
         url = urlparse(self.path)
         query = parse_qs(url.query)
         parts = [unquote(part) for part in url.path.split("/") if part]
         try:
+            if self.server.app.auth is not None and self._sign_in_route(method, parts):
+                return
             if method == "GET" and not parts:
                 return self._send_static("index.html")
             if method == "GET" and len(parts) == 2 and parts[0] == "static":
@@ -531,17 +540,68 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return
 
-    def _local_request(self):
+    def _allowed_request(self, method):
+        """Only the site's own host and page may use it. A change (any method but GET) on the public site must
+        come from the site's own origin, which blocks requests sent from other pages."""
         if self.headers.get("Host") not in self.server.allowed_hosts:
             return False
         origin = self.headers.get("Origin")
-        if origin is not None and origin not in {f"http://{host}" for host in self.server.allowed_hosts}:
-            return False
-        return True
+        auth = self.server.app.auth
+        if auth is None:
+            return origin is None or origin in {f"http://{host}" for host in self.server.allowed_hosts}
+        if method != "GET":
+            return origin == f"https://{auth.public_host}"
+        return origin is None or origin == f"https://{auth.public_host}"
 
     def _authorized(self, query):
+        if self.server.app.auth is not None:
+            return self._signed_in()
         supplied = self.headers.get("X-Session-Token") or (query.get("token") or [""])[0]
         return hmac.compare_digest(supplied.encode(), self.server.app.token.encode())
+
+    def _signed_in(self):
+        try:
+            jar = SimpleCookie(self.headers.get("Cookie", ""))
+        except Exception:  # http.cookies raises a few error types on malformed input; none of them is a session
+            return False
+        morsel = jar.get(COOKIE_NAME)
+        return morsel is not None and self.server.app.auth.valid_session(morsel.value)
+
+    def _sign_in_route(self, method, parts):
+        """The public site's own routes. Returns True when one of them answered."""
+        if method == "GET" and parts == ["login"]:
+            self._send_login()
+            return True
+        if method == "POST" and parts == ["login"]:
+            self._login()
+            return True
+        if method == "POST" and parts == ["logout"]:
+            self._send(303, b"", "text/plain; charset=utf-8", {"Location": "/", "Set-Cookie": _cookie("", 0)})
+            return True
+        if method == "GET" and not parts and not self._signed_in():
+            self._send_login()
+            return True
+        return False
+
+    def _login(self):
+        auth = self.server.app.auth
+        length = min(int(self.headers.get("Content-Length") or 0), 1_000)
+        form = parse_qs(self.rfile.read(length).decode(errors="replace"))
+        password = (form.get("password") or [""])[0]
+        blocked = "Too many wrong passwords. Wait 15 minutes, then try again."
+        if auth.blocked():
+            return self._send_login(429, blocked)
+        if not auth.check_password(password):
+            auth.record_failure()
+            if auth.blocked():
+                return self._send_login(429, blocked)
+            return self._send_login(401, "That password is not right.")
+        self._send(303, b"", "text/plain; charset=utf-8", {"Location": "/", "Set-Cookie": _cookie(auth.new_session(), SESSION_SECONDS)})
+
+    def _send_login(self, status=200, message=""):
+        block = f'<p class="notice error">{escape(message)}</p>' if message else ""
+        page = LOGIN_PAGE.replace("{message_block}", block)
+        self._send(status, page.encode(), "text/html; charset=utf-8")
 
     def _body(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -563,13 +623,40 @@ class Handler(BaseHTTPRequestHandler):
     def _send(self, status, body, content_type, headers=None):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        for name, value in {**SECURITY_HEADERS, **(headers or {})}.items():
+        extra = {"Strict-Transport-Security": "max-age=31536000"} if self.server.app.auth is not None else {}
+        for name, value in {**SECURITY_HEADERS, **extra, **(headers or {})}.items():
             self.send_header(name, value)
         if body is not None:
             self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if body is not None:
             self.wfile.write(body)
+
+
+def _cookie(value, max_age):
+    return f"{COOKIE_NAME}={value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={max_age}"
+
+
+LOGIN_PAGE = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · Agent team</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="login">
+    <h1>Sign in</h1>
+    {message_block}
+    <form action="/login" method="post">
+      <label>Password <input name="password" type="password" required autofocus autocomplete="current-password"></label>
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>
+"""
 
 
 def _turn_number(body):
@@ -610,7 +697,11 @@ def _env_keys():
     }
 
 
-def serve(port=8765, data_dir="data"):
+def serve(port=8765, data_dir="data", environ=None):
+    """Start the web app. With AGENT_TEAM_PUBLIC_HOST set, it serves the public site: all interfaces, on $PORT,
+    behind the owner's sign-in. Otherwise it serves this machine only, with a token in the link."""
+    environ = os.environ if environ is None else environ
+    settings = public_settings(environ)
     data = Path(data_dir)
     lock = acquire_data_lock(data)  # held until the process exits
     store = Store(data / "agent_team.db")
@@ -618,9 +709,16 @@ def serve(port=8765, data_dir="data"):
     token = secrets.token_urlsafe(24)
     vault = KeyVault(data)
     log = RunLog(data / "agent_team.log", secrets=vault.secret_values)
-    app = App(store, vault, token, workspaces=data / "workspaces", baselines=data / "accepted", log=log)
-    server = Server(port, app)
-    print(f"Agent team is running. Open http://127.0.0.1:{server.server_port}/?token={token}")
+    auth, host = None, "127.0.0.1"
+    if settings:
+        auth = OwnerAuth(settings["password_hash"], settings["secret"], settings["host"])
+        host, port = "0.0.0.0", int(environ.get("PORT", port))
+    app = App(store, vault, token, workspaces=data / "workspaces", baselines=data / "accepted", log=log, auth=auth)
+    server = Server(port, app, host=host)
+    if settings:
+        print(f"Agent team is running at https://{settings['host']}/ (port {server.server_port})")
+    else:
+        print(f"Agent team is running. Open http://127.0.0.1:{server.server_port}/?token={token}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

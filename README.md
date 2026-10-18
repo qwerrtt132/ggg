@@ -44,7 +44,7 @@ Keys: enter them in the API keys panel. They stay on the server and are never sh
 
 Configs never hold keys. A config with a key field is refused.
 
-The server listens only on 127.0.0.1 and rejects requests from other hosts or origins. `data/` holds run history, presets, workspaces, and any saved keys. It is git-ignored.
+The server listens only on 127.0.0.1 and rejects requests from other hosts or origins. The public site (below) is the one exception. `data/` holds run history, presets, workspaces, and any saved keys. It is git-ignored.
 
 ### Command line
 
@@ -110,6 +110,32 @@ Running code is not available. Model-written code would run on your machine, so 
 - A stream that fails before any output is retried. One that fails after output has started is not, so no tokens are billed twice. A stream that ends early is reported as an error, not as a short reply.
 - Limits stop runaway runs, and the run status says which one applied: `max_turns`, `max_seconds` (`timeout`), `max_tokens` (`token_budget`), a repeated turn (`stalled`), `no_progress`, `stopped`, `failed`, `idle` when no one has anything left to do, or `interrupted` after a restart.
 
+### Public site
+
+The same app can run on the internet for one owner. It stays private unless `AGENT_TEAM_PUBLIC_HOST` is set. Then:
+
+- It listens on all interfaces, on `$PORT`, and answers only for `AGENT_TEAM_PUBLIC_HOST`.
+- Every page and API call needs the owner's sign-in. The session cookie is HttpOnly, Secure, and SameSite=Strict, and it lasts 12 hours. A session cannot be revoked before it expires. Changing `AGENT_TEAM_SESSION_SECRET` signs everyone out at once.
+- Ten wrong passwords within 15 minutes block sign-in for 15 minutes.
+- Any change must come from the site's own origin, so other pages cannot make requests on the owner's behalf.
+
+Settings:
+
+| Setting | What it is |
+|---|---|
+| `AGENT_TEAM_PUBLIC_HOST` | The host name the site is served on, such as `agent-team-abc-uc.a.run.app`. |
+| `AGENT_TEAM_OWNER_PASSWORD_HASH` | The output of `agent-team set-password`. The password itself is never stored. |
+| `AGENT_TEAM_SESSION_SECRET` | A random string of 32 or more characters. |
+
+Deploy to Google Cloud Run:
+
+1. Create the two secrets in Secret Manager: `agent-team-password-hash` (the output of `agent-team set-password`) and `agent-team-session-secret` (a random string).
+2. From the repository root, with your own Google login: `PROJECT=your-project ./deploy/cloudrun.sh`
+
+The script deploys one instance, then sets the real host name. Keep it at one instance: the sign-in limit is counted in memory.
+
+**Storage is not solved.** Cloud Run erases its disk when an instance restarts. The database, the run log, and saved keys live in `/data`, so a restart loses them. Until that is settled, treat the public site as a place to try things, not to keep work.
+
 ### Operations
 
 - `GET /api/health` (with the session token) reports the version, whether the database answers, and how many runs are active. It returns 503 when the database does not answer.
@@ -128,6 +154,7 @@ GitHub Actions runs the suite on Python 3.10 and 3.13 (`.github/workflows/tests.
 ### Known limits
 
 - Only one server can use a data directory at a time. The lock is an OS file lock. It is not enforced on Windows, where you must run one server per data directory yourself.
+- The public site has one password and no second factor. Its sign-in page is open to anyone who finds the address, and a stolen session works until it expires.
 - Replies stream. The page shows the end of each agent's reply while it arrives. That live text is not saved, so after a reconnect it shows only what is streaming at that moment. The saved feed shows the full message once the turn ends.
 - Cost figures are estimates from the prices in the config. A config with a version other than 1 is refused when it is saved as a preset and when a run starts.
 - The `openai_compatible` provider needs a server with tool calling. Chat-only servers fail. Streaming also asks for token usage with `stream_options`. A server that rejects that option will fail the request.
