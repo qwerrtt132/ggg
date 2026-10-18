@@ -74,7 +74,7 @@ Cost is input tokens times the input price, plus output tokens times the output 
 
 Each member has a name, a role, a provider, a model, and optional `tools`:
 - `files`: list, read, and write files in the run's workspace. Paths outside the workspace and symbolic links are refused.
-- `fetch`: read an http or https page as text. Private, loopback, and link-local addresses are refused, including on redirects.
+- `fetch`: read an http or https page as text. Private, loopback, and link-local addresses are refused, including on redirects. Each connection goes to the address that was checked, so a second DNS lookup cannot send it elsewhere.
 
 A run's workspace lives in `data/workspaces/<run id>/`.
 
@@ -123,10 +123,12 @@ python -m unittest discover -s tests
 
 The tests use scripted replies and local stub servers, so they don't call any real API. The browser tests need Playwright and a Chromium binary, and skip themselves when either is missing. Set `AGENT_TEAM_CHROME` to choose the Chromium binary. The package test builds a wheel with pip, installs it into an empty folder, and checks the default team from there.
 
+GitHub Actions runs the suite on Python 3.10 and 3.13 (`.github/workflows/tests.yml`). It installs Chromium, and it fails if any test is skipped, so the browser tests cannot quietly stop running.
+
 ### Known limits
 
 - Only one server can use a data directory at a time. The lock is an OS file lock. It is not enforced on Windows, where you must run one server per data directory yourself.
 - Replies stream. The page shows the end of each agent's reply while it arrives. That live text is not saved, so after a reconnect it shows only what is streaming at that moment. The saved feed shows the full message once the turn ends.
 - Cost figures are estimates from the prices in the config. A config with a version other than 1 is refused when a run starts, including a preset that holds one.
 - The `openai_compatible` provider needs a server with tool calling. Chat-only servers fail. Streaming also asks for token usage with `stream_options`. A server that rejects that option will fail the request.
-- The fetch tool checks an address before connecting. A name whose address changes between the check and the connection could still reach a private address. Treat fetch as reading public pages, not as a hardened proxy.
+- The fetch tool checks every address a name resolves to, then connects to one of the checked addresses. It does not look the name up again, so a name that changes its address is not followed. Fetch still reads any public page an agent asks for, so do not treat it as a content filter.

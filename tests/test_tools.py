@@ -1,4 +1,5 @@
 import json
+import socket
 import os
 import tempfile
 import threading
@@ -101,6 +102,125 @@ class FetchTests(unittest.TestCase):
 
         self.assertTrue(is_error)
         self.assertIn("only http and https", text)
+
+
+class _Hops(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/to-internal":
+            return self._redirect(f"http://internal.example:{self.server.server_port}/")
+        if self.path == "/to-file":
+            return self._redirect("file:///etc/passwd")
+        if self.path == "/loop":
+            return self._redirect("/loop")
+        if self.path == "/missing":
+            self.send_response(404)
+            self.send_header("content-length", "0")
+            self.end_headers()
+            return
+        body = b"<html><body><h1>Title</h1></body></html>"
+        self.send_response(200)
+        self.send_header("content-type", "text/html; charset=utf-8")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _redirect(self, location):
+        self.send_response(302)
+        self.send_header("location", location)
+        self.send_header("content-length", "0")
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+class PinnedFetchTests(unittest.TestCase):
+    """Fake DNS answers, so a name can be made to change its address between two lookups, as an attacker would."""
+
+    PUBLIC = "93.184.216.34"
+
+    def setUp(self):
+        env = mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"})
+        env.start()
+        self.addCleanup(env.stop)
+        self.server = HTTPServer(("127.0.0.1", 0), _Hops)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.port = self.server.server_port
+        self.answers = {}  # host -> list of answers, one per lookup; the last answer repeats
+        self.connected = []  # the address each connection was made to
+        self.lookups = {}
+        real_connect = socket.create_connection
+
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            if host == "127.0.0.1":  # the local test server, reached by its address, needs no lookup
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (host, port or 0))]
+            if host not in self.answers:
+                raise socket.gaierror(f"unknown host {host}")
+            index = self.lookups.get(host, 0)
+            self.lookups[host] = index + 1
+            ips = self.answers[host][min(index, len(self.answers[host]) - 1)]
+            return [
+                (socket.AF_INET6 if ":" in ip else socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port or 0))
+                for ip in ips
+            ]
+
+        def fake_connect(address, timeout=None, *args, **kwargs):
+            host, port = address
+            self.connected.append(host)
+            if host == self.PUBLIC:  # the public address is served by the local test server
+                return real_connect(("127.0.0.1", self.port), timeout)
+            return real_connect(address, timeout)
+
+        for patcher in (
+            mock.patch("socket.getaddrinfo", side_effect=fake_getaddrinfo),
+            mock.patch("socket.create_connection", side_effect=fake_connect),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_the_connection_goes_to_the_checked_address_not_a_second_lookup(self):
+        # A second lookup would now answer 127.0.0.1. The connection must still go to the address that was checked.
+        self.answers["public.example"] = [[self.PUBLIC], ["127.0.0.1"]]
+
+        text = fetch(f"http://public.example:{self.port}/")
+
+        self.assertIn("Title", text)
+        self.assertEqual(self.connected, [self.PUBLIC])
+
+    def test_each_redirect_target_is_checked_before_it_is_connected(self):
+        self.answers["public.example"] = [[self.PUBLIC]]
+        self.answers["internal.example"] = [["10.0.0.5"]]
+
+        with self.assertRaisesRegex(ToolError, "internal.example is a private address"):
+            fetch(f"http://public.example:{self.port}/to-internal")
+        self.assertNotIn("10.0.0.5", self.connected)
+
+    def test_a_redirect_to_a_file_is_refused(self):
+        self.answers["public.example"] = [[self.PUBLIC]]
+
+        with self.assertRaisesRegex(ToolError, "only http and https"):
+            fetch(f"http://public.example:{self.port}/to-file")
+
+    def test_an_ipv4_mapped_loopback_address_is_refused(self):
+        self.answers["mapped.example"] = [["::ffff:127.0.0.1"]]
+
+        with self.assertRaisesRegex(ToolError, "private address"):
+            fetch(f"http://mapped.example:{self.port}/")
+        self.assertEqual(self.connected, [])
+
+    def test_an_endless_redirect_is_stopped(self):
+        self.answers["public.example"] = [[self.PUBLIC]]
+
+        with self.assertRaisesRegex(ToolError, "redirected more than 5 times"):
+            fetch(f"http://public.example:{self.port}/loop")
+
+    def test_an_error_status_is_reported(self):
+        self.answers["public.example"] = [[self.PUBLIC]]
+
+        with self.assertRaisesRegex(ToolError, "HTTP 404"):
+            fetch(f"http://public.example:{self.port}/missing")
 
 
 class TeamToolTests(unittest.TestCase):

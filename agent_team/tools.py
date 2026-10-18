@@ -4,20 +4,22 @@ Each group is opt-in per team member: "files" or "fetch" in the member's "tools"
 """
 
 import html
+import http.client
 import ipaddress
 import os
 import re
 import shutil
 import socket
+import ssl
 from pathlib import Path
-from urllib.error import URLError
-from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.parse import urljoin, urlsplit
 
 MAX_READ = 100_000
 MAX_WRITE = 200_000
 MAX_FETCH = 200_000
 MAX_LIST = 200
+MAX_REDIRECTS = 5
+REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 GROUPS = {
     "files": ("list_files", "read_file", "write_file"),
     "fetch": ("fetch_url",),
@@ -129,21 +131,35 @@ def copy_workspace(source, destination):
 
 
 def check_url(url, allow_private=False):
+    """Refuses a non-public address. Returns the address to connect to, which is one of the addresses just checked,
+    so a second lookup cannot send the connection somewhere else (DNS rebinding). Returns None when private
+    addresses are allowed; the connection then uses the name."""
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https"):
         raise ToolError("only http and https addresses can be fetched")
     if not parts.hostname:
         raise ToolError("the address has no host name")
-    if allow_private:
-        return
     try:
-        addresses = socket.getaddrinfo(parts.hostname, parts.port or 0, proto=socket.IPPROTO_TCP)
+        port = parts.port or 0
+    except ValueError:
+        raise ToolError("the address has an invalid port") from None
+    if allow_private:
+        return None
+    try:
+        addresses = socket.getaddrinfo(parts.hostname, port, proto=socket.IPPROTO_TCP)
     except socket.gaierror:
         raise ToolError(f"could not look up {parts.hostname}") from None
+    checked = []
     for *_, sockaddr in addresses:
-        address = ipaddress.ip_address(sockaddr[0])
+        address = ipaddress.ip_address(sockaddr[0].split("%")[0])
+        if address.version == 6 and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped  # ::ffff:127.0.0.1 is the loopback address too
         if address.is_private or address.is_loopback or address.is_link_local or address.is_multicast or address.is_reserved or address.is_unspecified:
             raise ToolError(f"{parts.hostname} is a private address, which cannot be fetched")
+        checked.append(str(address))
+    if not checked:
+        raise ToolError(f"could not look up {parts.hostname}")
+    return checked[0]
 
 
 def html_to_text(markup):
@@ -152,29 +168,69 @@ def html_to_text(markup):
     return re.sub(r"\s+", " ", text).strip()
 
 
-class CheckedRedirects(HTTPRedirectHandler):
-    """Checks every redirect target the same way as the first address, so a redirect cannot reach a private host."""
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """Connects to a checked address. The host name still goes in the Host header."""
 
-    def __init__(self, allow_private=False):
-        self.allow_private = allow_private
+    def __init__(self, host, port, address, timeout):
+        super().__init__(host, port, timeout=timeout)
+        self.address = address
 
-    def redirect_request(self, request, fp, code, message, headers, newurl):
-        check_url(newurl, self.allow_private)
-        return super().redirect_request(request, fp, code, message, headers, newurl)
+    def connect(self):
+        self.sock = socket.create_connection((self.address, self.port), self.timeout)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Connects to a checked address, and checks the certificate against the host name, as for any HTTPS request."""
+
+    def __init__(self, host, port, address, timeout):
+        super().__init__(host, port, timeout=timeout, context=ssl.create_default_context())
+        self.address = address
+
+    def connect(self):
+        sock = socket.create_connection((self.address, self.port), self.timeout)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+def _get(url, address, timeout):
+    """One request, with no redirects followed. Returns (status, headers, body bytes up to the limit)."""
+    parts = urlsplit(url)
+    secure = parts.scheme == "https"
+    port = parts.port or (443 if secure else 80)
+    connection_class = _PinnedHTTPSConnection if secure else _PinnedHTTPConnection
+    connection = connection_class(parts.hostname, port, address or parts.hostname, timeout)
+    target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    try:
+        connection.request("GET", target, headers={"User-Agent": "agent-team/1.0"})
+        response = connection.getresponse()
+        status, headers = response.status, response.headers
+        body = b"" if status in REDIRECT_STATUSES else response.read(MAX_FETCH + 1)
+    finally:
+        connection.close()
+    return status, headers, body
 
 
 def fetch(url, allow_private=False, timeout=20):
-    check_url(url, allow_private)
-    request = Request(url, headers={"User-Agent": "agent-team/1.0"})
-    try:
-        with build_opener(CheckedRedirects(allow_private)).open(request, timeout=timeout) as response:
-            content_type = response.headers.get("content-type", "")
-            charset = response.headers.get_content_charset() or "utf-8"
-            data = response.read(MAX_FETCH + 1)
-    except (URLError, TimeoutError, OSError) as error:
-        raise ToolError(f"could not fetch the page: {error}") from None
+    """Reads a page as text. Every hop, including each redirect, is checked and connected to on its own."""
+    for _ in range(MAX_REDIRECTS + 1):
+        address = check_url(url, allow_private)
+        try:
+            status, headers, data = _get(url, address, timeout)
+        except (OSError, http.client.HTTPException) as error:
+            raise ToolError(f"could not fetch the page: {error}") from None
+        if status in REDIRECT_STATUSES:
+            location = headers.get("location")
+            if not location:
+                raise ToolError("the page redirected without saying where to")
+            url = urljoin(url, location)
+            continue
+        if status >= 400:
+            raise ToolError(f"could not fetch the page: HTTP {status}")
+        break
+    else:
+        raise ToolError(f"the page redirected more than {MAX_REDIRECTS} times")
+    charset = headers.get_content_charset() or "utf-8"
     text = data[:MAX_FETCH].decode(charset, errors="replace")
-    if "html" in content_type:
+    if "html" in headers.get("content-type", ""):
         text = html_to_text(text)
     if len(data) > MAX_FETCH:
         text += f"\n[The page continues. Only the first {MAX_FETCH} bytes are shown.]"

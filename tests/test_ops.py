@@ -21,7 +21,6 @@ from agent_team.runner import ConfigError, build_team, default_config
 from agent_team.server import App, Server
 from agent_team.store import Store
 from agent_team.team import Agent, Team
-from agent_team.tools import CheckedRedirects, ToolError
 
 REPO = Path(__file__).resolve().parent.parent
 SESSION_TOKEN = "tok-session-7f3a9c1e5b"
@@ -284,16 +283,8 @@ class SecurityRoundTwoTests(ServerTestCase):
             self.assertNotIn(SESSION_TOKEN, body.decode())
             self.assertNotIn(STUB_KEY, body.decode())
 
-    def test_a_redirect_to_a_private_address_is_refused(self):
-        # Checklist: fetch redirects. Every hop is checked, not only the first address.
-        handler = CheckedRedirects(allow_private=False)
-        with self.assertRaisesRegex(ToolError, "private address"):
-            handler.redirect_request(None, None, 302, "Found", {}, "http://127.0.0.1:9/secret")
-
-    def test_a_redirect_to_a_file_is_refused(self):
-        handler = CheckedRedirects(allow_private=False)
-        with self.assertRaisesRegex(ToolError, "only http and https"):
-            handler.redirect_request(None, None, 302, "Found", {}, "file:///etc/passwd")
+    # Checklist: fetch redirects, and connections to a checked address. Covered by PinnedFetchTests in
+    # tests/test_tools.py: each hop is checked and connected to on its own, and a second lookup cannot redirect it.
 
 
 

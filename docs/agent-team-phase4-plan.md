@@ -1,6 +1,6 @@
 # Agent team: phase 4 plan
 
-Status: M1 to M6 done. M5 done: a progress count and a stall that triggers a re-plan (bounded), with the lead writing the plan through update_plan. M6 done: health, logs, config version, cost dashboard, packaging check, and the security checklist below. 152 tests passing. Based on [the research report](../reports/Agent%20team%20tools%20research.md) and the [review of phases 1 to 3](../reports/Agent%20team%20tools%20research.md#6-what-this-means-for-us). Owner: the repo's maintainer.
+Status: M1 to M6 done. M5 done: a progress count and a stall that triggers a re-plan (bounded), with the lead writing the plan through update_plan. M6 done: health, logs, config version, cost dashboard, packaging check, and the security checklist below. 156 tests passing. CI runs the suite on Python 3.10 and 3.13 with Chromium, and fails on skipped tests. Based on [the research report](../reports/Agent%20team%20tools%20research.md) and the [review of phases 1 to 3](../reports/Agent%20team%20tools%20research.md#6-what-this-means-for-us). Owner: the repo's maintainer.
 
 Phase 4 does two things. It fixes the issues from the review, and it adds the four capabilities the research showed matter most for running agents in a way people can operate: per-step snapshots with rewind, approvals with patch-level review, a trace view, and re-planning on stall.
 
@@ -85,7 +85,7 @@ Status: done. Where each part is tested:
 - Dashboard: each run shows status, tokens, estimated cost, and duration, with filters by status and goal search. `DashboardTests` covers the API, and `test_the_dashboard_shows_spend_and_filters_runs` in `tests/test_ui.py` covers the page.
 - Packaging: `PackageTests` builds a wheel, installs it into an empty folder, and checks the default team from there. The version in the code is checked against `pyproject.toml`.
 - Security checklist, round 2:
-  1. Fetch redirects: every redirect target is checked the same way as the first address. `SecurityRoundTwoTests` (the `CheckedRedirects` cases). Still open: a name that changes address between the check and the connection (README, known limits).
+  1. Fetch redirects and DNS rebinding: every hop is checked and connected to on its own, at a checked address, so a name that changes address between the check and the connection is not followed. `PinnedFetchTests` in `tests/test_tools.py`.
   2. Lock file: `LockTests` in `tests/test_app.py`, which starts a second holder on one data folder.
   3. Token and keys in exports: `SecurityRoundTwoTests.test_an_export_does_not_carry_the_session_token_or_a_key`.
 
