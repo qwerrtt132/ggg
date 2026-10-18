@@ -54,6 +54,7 @@ def main(argv=None):
     serve_command = commands.add_parser("serve", help="start the web app on 127.0.0.1")
     serve_command.add_argument("--port", type=int, default=8765)
     serve_command.add_argument("--data-dir", default="data", help="where runs and saved keys are stored")
+    serve_command.add_argument("--lan", action="store_true", help="let other devices on this home network open the site")
 
     commands.add_parser("set-password", help="print a password hash for AGENT_TEAM_OWNER_PASSWORD_HASH on the public site")
 
@@ -67,7 +68,7 @@ def main(argv=None):
         return _set_password()
     if args.command == "serve":
         try:
-            serve(args.port, args.data_dir)
+            serve(args.port, args.data_dir, lan=args.lan)
         except RuntimeError as error:
             print(f"error: {error}", file=sys.stderr)
             return 2

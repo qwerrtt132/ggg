@@ -21,6 +21,7 @@ from .auth import COOKIE_NAME, SESSION_SECONDS, OwnerAuth, public_settings
 from .keys import KeyVault, KeyVaultError
 from .locks import acquire_data_lock
 from .logs import RunLog
+from .network import lan_address
 from .providers import ProviderError
 from .runner import (
     ConfigError,
@@ -94,13 +95,15 @@ class App:
 class Server(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, port, app, host="127.0.0.1"):
+    def __init__(self, port, app, host="127.0.0.1", lan_ip=None):
         super().__init__((host, port), Handler)
         self.app = app
         if app.auth is not None:
             self.allowed_hosts = {app.auth.public_host}
         else:
             self.allowed_hosts = {f"127.0.0.1:{self.server_port}", f"localhost:{self.server_port}"}
+            if lan_ip:  # the address other devices on the home network use; only this one is allowed
+                self.allowed_hosts.add(f"{lan_ip}:{self.server_port}")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -642,7 +645,7 @@ LOGIN_PAGE = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sign in · Agent team</title>
+  <title>Sign in · Detto</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -697,9 +700,20 @@ def _env_keys():
     }
 
 
-def serve(port=8765, data_dir="data", environ=None):
+def startup_line(settings, port, token, lan_ip):
+    """What the terminal says when the server starts: where to open the site."""
+    if settings:
+        return f"Detto is running at https://{settings['host']}/ (port {port})"
+    line = f"Detto is running. On this PC: http://127.0.0.1:{port}/?token={token}"
+    if lan_ip:
+        line += f"\nOn your home network: http://{lan_ip}:{port}/?token={token}"
+    return line
+
+
+def serve(port=8765, data_dir="data", environ=None, lan=False):
     """Start the web app. With AGENT_TEAM_PUBLIC_HOST set, it serves the public site: all interfaces, on $PORT,
-    behind the owner's sign-in. Otherwise it serves this machine only, with a token in the link."""
+    behind the owner's sign-in. With lan, it also answers other devices on this home network, at this PC's
+    address only. Otherwise it serves this machine only, with a token in the link."""
     environ = os.environ if environ is None else environ
     settings = public_settings(environ)
     data = Path(data_dir)
@@ -709,16 +723,18 @@ def serve(port=8765, data_dir="data", environ=None):
     token = secrets.token_urlsafe(24)
     vault = KeyVault(data)
     log = RunLog(data / "agent_team.log", secrets=vault.secret_values)
-    auth, host = None, "127.0.0.1"
+    auth, host, lan_ip = None, "127.0.0.1", None
     if settings:
         auth = OwnerAuth(settings["password_hash"], settings["secret"], settings["host"])
         host, port = "0.0.0.0", int(environ.get("PORT", port))
+    elif lan:
+        lan_ip = lan_address()
+        if lan_ip is None:
+            raise RuntimeError("no network address was found, so other devices cannot reach this PC")
+        host = "0.0.0.0"
     app = App(store, vault, token, workspaces=data / "workspaces", baselines=data / "accepted", log=log, auth=auth)
-    server = Server(port, app, host=host)
-    if settings:
-        print(f"Agent team is running at https://{settings['host']}/ (port {server.server_port})")
-    else:
-        print(f"Agent team is running. Open http://127.0.0.1:{server.server_port}/?token={token}")
+    server = Server(port, app, host=host, lan_ip=lan_ip)
+    print(startup_line(settings, server.server_port, token, lan_ip))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -1,6 +1,6 @@
 # ggg
 
-## Agent team
+## Detto
 
 `agent_team` runs a team of AI agents that message each other toward a goal. Each agent can use a different provider and model. You bring your own API keys. You can run it from a web page, or from the command line.
 
@@ -44,7 +44,7 @@ Keys: enter them in the API keys panel. They stay on the server and are never sh
 
 Configs never hold keys. A config with a key field is refused.
 
-The server listens only on 127.0.0.1 and rejects requests from other hosts or origins. The public site (below) is the one exception. `data/` holds run history, presets, workspaces, and any saved keys. It is git-ignored.
+The server listens only on 127.0.0.1 and rejects requests from other hosts or origins. Two exceptions: the home network option (below) and the public site. `data/` holds run history, presets, workspaces, and any saved keys. It is git-ignored.
 
 ### Command line
 
@@ -109,6 +109,15 @@ Running code is not available. Model-written code would run on your machine, so 
 - A config without `max_tokens` gets a budget of 200,000 tokens. Set `"max_tokens": null` to run with no budget. The time limit covers the whole run, including a call that is in progress.
 - A stream that fails before any output is retried. One that fails after output has started is not, so no tokens are billed twice. A stream that ends early is reported as an error, not as a short reply.
 - Limits stop runaway runs, and the run status says which one applied: `max_turns`, `max_seconds` (`timeout`), `max_tokens` (`token_budget`), a repeated turn (`stalled`), `no_progress`, `stopped`, `failed`, `idle` when no one has anything left to do, or `interrupted` after a restart.
+
+### Use Detto from your phone on home Wi-Fi
+
+Start the server with `agent-team serve --lan`. It prints two links. The first works on this PC. The second, under "On your home network", works on any device on the same Wi-Fi. Open it on the phone. It contains the same token as the first link, so anyone who has the link can use the site.
+
+- Windows asks whether to let Python through the firewall the first time. Allow it on private networks.
+- The Wi-Fi network has to be set to **Private** in Windows. On a Public network, Windows blocks other devices.
+- Only this PC's own address is accepted from the network. Requests for any other address are refused.
+- The site is not reachable from outside your home. For that, see the public site below.
 
 ### Public site
 
