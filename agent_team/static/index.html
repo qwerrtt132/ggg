@@ -100,6 +100,26 @@
       <button id="start" type="button">Start run</button>
 
       <h2>Past runs</h2>
+      <div class="run-filters">
+        <label>Search goals <input id="run-search" type="search" placeholder="Find a run"></label>
+        <label>Status
+          <select id="run-filter">
+            <option value="">Any</option>
+            <option value="running">running</option>
+            <option value="done">done</option>
+            <option value="stalled">stalled</option>
+            <option value="no_progress">no_progress</option>
+            <option value="timeout">timeout</option>
+            <option value="token_budget">token_budget</option>
+            <option value="max_turns">max_turns</option>
+            <option value="stopped">stopped</option>
+            <option value="idle">idle</option>
+            <option value="failed">failed</option>
+            <option value="interrupted">interrupted</option>
+          </select>
+        </label>
+      </div>
+      <p id="run-totals" class="muted" role="status"></p>
       <ul id="run-list" class="list"></ul>
     </section>
 

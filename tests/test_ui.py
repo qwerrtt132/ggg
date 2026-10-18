@@ -290,6 +290,33 @@ class UiTests(unittest.TestCase):
         expect(page.locator("#start")).to_be_disabled()
         self.assertEqual(self.errors, [])
 
+    def test_the_dashboard_shows_spend_and_filters_runs(self):
+        self.store.create_run("ui-dash-a", "dashboard summary of the report", None)
+        self.store.add_event("ui-dash-a", "turn", {"tokens": 1000, "cost": 0.5})
+        self.store.finish_run("ui-dash-a", "done")
+        self.store.create_run("ui-dash-b", "dashboard poem about rain", None)
+        self.store.add_event("ui-dash-b", "turn", {"tokens": 200, "cost": None})
+        self.store.finish_run("ui-dash-b", "failed")
+
+        page = self.open_page()
+        summary = page.locator("#run-list li", has_text="dashboard summary")
+        expect(summary).to_contain_text("1,000 tokens")
+        expect(summary).to_contain_text("about $0.5000")
+        expect(page.locator("#run-list li", has_text="dashboard poem")).to_contain_text("no price set")
+
+        page.fill("#run-search", "dashboard")
+        expect(page.locator("#run-totals")).to_contain_text("2 runs, 1,200 tokens, about $0.5000 (1 without a price)")
+
+        page.fill("#run-search", "poem")
+        expect(page.locator("#run-list li")).to_have_count(1)
+        expect(page.locator("#run-list")).to_contain_text("dashboard poem")
+
+        page.fill("#run-search", "dashboard")
+        page.select_option("#run-filter", "done")
+        expect(page.locator("#run-list li")).to_have_count(1)
+        expect(page.locator("#run-list")).to_contain_text("dashboard summary")
+        self.assertEqual(self.errors, [])
+
 
 if __name__ == "__main__":
     unittest.main()

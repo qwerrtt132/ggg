@@ -73,6 +73,18 @@ class KeyVault:
             self.saved.pop(provider, None)
             self._write()
 
+    def secret_values(self):
+        """Every key this vault can give out, for redacting logs and errors. Keys that cannot be read are skipped."""
+        with self.lock:
+            names = set(self.memory) | set(self.saved)
+        values = []
+        for name in names:
+            try:
+                values.append(self.get(name))
+            except KeyVaultError:
+                pass
+        return [value for value in values if value]
+
     def status(self):
         """Masked view only. Full keys never leave this class through this method."""
         with self.lock:

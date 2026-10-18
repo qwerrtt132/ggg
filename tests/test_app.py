@@ -541,12 +541,12 @@ class ConcurrencyTests(unittest.TestCase):
         real = server_module.run_in_background
         gate = self.gate
 
-        def gated(store, run_id, team, action, secrets):
+        def gated(store, run_id, team, action, secrets, log=None):
             def held():
                 gate.wait(5)
                 return action()
 
-            thread = real(store, run_id, team, held, secrets)
+            thread = real(store, run_id, team, held, secrets, log=log)
             time.sleep(0.3)
             return thread
 

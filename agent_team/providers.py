@@ -41,7 +41,9 @@ class Reply:
     text: str = ""
     tool_calls: list = field(default_factory=list)
     truncated: bool = False  # the output limit cut the reply short
-    tokens: int = 0
+    tokens: int = 0  # input and output together, what the token budget counts
+    tokens_in: int = 0  # prompt tokens, priced separately from output
+    tokens_out: int = 0  # completion tokens
 
 
 class Provider:
@@ -176,6 +178,8 @@ def _anthropic_reply(data):
         ],
         truncated=data.get("stop_reason") == "max_tokens",
         tokens=usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+        tokens_in=usage.get("input_tokens", 0),
+        tokens_out=usage.get("output_tokens", 0),
     )
 
 
@@ -240,6 +244,8 @@ class _AnthropicStream:
             tool_calls=calls,
             truncated=self.stop_reason == "max_tokens",
             tokens=self.tokens_in + self.tokens_out,
+            tokens_in=self.tokens_in,
+            tokens_out=self.tokens_out,
         )
 
 
@@ -314,8 +320,17 @@ def _openai_reply(data):
         text=message.get("content") or "",
         tool_calls=[_openai_call(raw) for raw in message.get("tool_calls") or []],
         truncated=choice.get("finish_reason") == "length",
-        tokens=data.get("usage", {}).get("total_tokens", 0),
+        **_openai_usage(data.get("usage")),
     )
+
+
+def _openai_usage(usage):
+    usage = usage or {}
+    return {
+        "tokens": usage.get("total_tokens", 0),
+        "tokens_in": usage.get("prompt_tokens", 0),
+        "tokens_out": usage.get("completion_tokens", 0),
+    }
 
 
 class _OpenAIStream:
@@ -324,7 +339,7 @@ class _OpenAIStream:
         self.text = ""
         self.calls = {}
         self.finish_reason = None
-        self.tokens = 0
+        self.usage = None
         self.started = False  # any event received
         self.done = False  # a finish reason or the [DONE] marker received
 
@@ -335,7 +350,7 @@ class _OpenAIStream:
             return
         payload = json.loads(data)
         if payload.get("usage"):
-            self.tokens = payload["usage"].get("total_tokens", 0)
+            self.usage = payload["usage"]
         for choice in payload.get("choices", []):
             if choice.get("finish_reason"):
                 self.finish_reason = choice["finish_reason"]
@@ -360,7 +375,7 @@ class _OpenAIStream:
             text=self.text,
             tool_calls=calls,
             truncated=self.finish_reason == "length",
-            tokens=self.tokens,
+            **_openai_usage(self.usage),
         )
 
 

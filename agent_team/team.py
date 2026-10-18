@@ -162,6 +162,7 @@ class Team:
         step_mode=False,
         max_replans=DEFAULT_MAX_REPLANS,
         stall_turns=DEFAULT_STALL_TURNS,
+        prices=None,
     ):
         names = [agent.name for agent in agents]
         if len(set(names)) != len(names):
@@ -190,6 +191,7 @@ class Team:
         self.step_mode = bool(step_mode)
         self.max_replans = max_replans
         self.stall_turns = stall_turns
+        self.prices = dict(prices or {})  # (provider name, model) -> (input, output) price per million tokens
         self.plan = None
         self.replans_used = 0
         self._idle_turns = 0
@@ -291,6 +293,9 @@ class Team:
                 agent=name,
                 turn=self.turn_no,
                 tokens=reply.tokens,
+                tokens_in=reply.tokens_in,
+                tokens_out=reply.tokens_out,
+                cost=self._cost(agent, reply),
                 total_tokens=self.tokens_used,
                 truncated=reply.truncated,
             )
@@ -336,6 +341,16 @@ class Team:
                 self._idle_turns = 0
             if self.step_mode and not self._wait_for_step():
                 return self._finish("stopped")
+
+    def _cost(self, agent, reply):
+        """Estimated cost of one call, or None when the config has no price for this provider and model."""
+        if not self.prices:
+            return None
+        price = self.prices.get((agent.provider.name, agent.model))
+        if price is None:
+            return None
+        input_price, output_price = price
+        return (reply.tokens_in * input_price + reply.tokens_out * output_price) / 1_000_000
 
     def _finish(self, status, answer=None):
         self.status = status

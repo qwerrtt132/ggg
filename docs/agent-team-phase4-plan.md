@@ -1,6 +1,6 @@
 # Agent team: phase 4 plan
 
-Status: M1 to M4 done. M5 done: a progress count and a stall that triggers a re-plan (bounded), with the lead writing the plan through update_plan. 126 tests passing. M6 planned, not started. Based on [the research report](../reports/Agent%20team%20tools%20research.md) and the [review of phases 1 to 3](../reports/Agent%20team%20tools%20research.md#6-what-this-means-for-us). Owner: the repo's maintainer.
+Status: M1 to M6 done. M5 done: a progress count and a stall that triggers a re-plan (bounded), with the lead writing the plan through update_plan. M6 done: health, logs, config version, cost dashboard, packaging check, and the security checklist below. 152 tests passing. Based on [the research report](../reports/Agent%20team%20tools%20research.md) and the [review of phases 1 to 3](../reports/Agent%20team%20tools%20research.md#6-what-this-means-for-us). Owner: the repo's maintainer.
 
 Phase 4 does two things. It fixes the issues from the review, and it adds the four capabilities the research showed matter most for running agents in a way people can operate: per-step snapshots with rewind, approvals with patch-level review, a trace view, and re-planning on stall.
 
@@ -77,6 +77,17 @@ Exit criteria: a scripted stall that re-plans once and then completes; a scripte
 - **Security review round 2:** a checklist from the review (fetch redirect handling, lock file, token handling in exports), with a test for each item.
 
 Exit criteria: health endpoint test; config version tests; a dashboard browser test; the package check in the test suite.
+
+Status: done. Where each part is tested:
+- Health: `GET /api/health`, in `HealthAndLogTests` (`tests/test_ops.py`).
+- Logs: `agent_team/logs.py` writes `data/agent_team.log`. `LogTests` checks the format and redaction, and `HealthAndLogTests` checks a finished run's line.
+- Config version: `ConfigVersionTests`. Version 1 and no version are read; any other version is refused with a message. Presets are not checked when saved; a run that starts from one is refused if its version is unknown.
+- Dashboard: each run shows status, tokens, estimated cost, and duration, with filters by status and goal search. `DashboardTests` covers the API, and `test_the_dashboard_shows_spend_and_filters_runs` in `tests/test_ui.py` covers the page.
+- Packaging: `PackageTests` builds a wheel, installs it into an empty folder, and checks the default team from there. The version in the code is checked against `pyproject.toml`.
+- Security checklist, round 2:
+  1. Fetch redirects: every redirect target is checked the same way as the first address. `SecurityRoundTwoTests` (the `CheckedRedirects` cases). Still open: a name that changes address between the check and the connection (README, known limits).
+  2. Lock file: `LockTests` in `tests/test_app.py`, which starts a second holder on one data folder.
+  3. Token and keys in exports: `SecurityRoundTwoTests.test_an_export_does_not_carry_the_session_token_or_a_key`.
 
 ## Not in phase 4
 

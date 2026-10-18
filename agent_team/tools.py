@@ -152,17 +152,22 @@ def html_to_text(markup):
     return re.sub(r"\s+", " ", text).strip()
 
 
+class CheckedRedirects(HTTPRedirectHandler):
+    """Checks every redirect target the same way as the first address, so a redirect cannot reach a private host."""
+
+    def __init__(self, allow_private=False):
+        self.allow_private = allow_private
+
+    def redirect_request(self, request, fp, code, message, headers, newurl):
+        check_url(newurl, self.allow_private)
+        return super().redirect_request(request, fp, code, message, headers, newurl)
+
+
 def fetch(url, allow_private=False, timeout=20):
     check_url(url, allow_private)
-
-    class CheckedRedirects(HTTPRedirectHandler):
-        def redirect_request(self, request, fp, code, message, headers, newurl):
-            check_url(newurl, allow_private)
-            return super().redirect_request(request, fp, code, message, headers, newurl)
-
     request = Request(url, headers={"User-Agent": "agent-team/1.0"})
     try:
-        with build_opener(CheckedRedirects).open(request, timeout=timeout) as response:
+        with build_opener(CheckedRedirects(allow_private)).open(request, timeout=timeout) as response:
             content_type = response.headers.get("content-type", "")
             charset = response.headers.get_content_charset() or "utf-8"
             data = response.read(MAX_FETCH + 1)

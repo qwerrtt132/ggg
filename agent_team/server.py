@@ -6,6 +6,7 @@ import os
 import queue
 import re
 import secrets
+import sqlite3
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -13,8 +14,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from . import __version__
 from .keys import KeyVault, KeyVaultError
 from .locks import acquire_data_lock
+from .logs import RunLog
 from .providers import ProviderError
 from .runner import ConfigError, build_team, check_provider, default_config, redact, refuse_secret_fields, run_in_background
 from .store import FINISHED, Store
@@ -53,10 +56,11 @@ class RunControl:
 
 
 class App:
-    def __init__(self, store, vault, token, max_active_runs=MAX_ACTIVE_RUNS, workspaces=None, baselines=None):
+    def __init__(self, store, vault, token, max_active_runs=MAX_ACTIVE_RUNS, workspaces=None, baselines=None, log=None):
         self.store = store
         self.vault = vault
         self.token = token
+        self.log = log  # a RunLog, or None to keep no log file
         if baselines is None and workspaces is not None:
             baselines = Path(workspaces).parent / "accepted"
         self.baselines = baselines  # one accepted-state folder per run, for reviewing changes
@@ -142,8 +146,13 @@ class Handler(BaseHTTPRequestHandler):
         if method == "DELETE" and len(parts) == 2 and parts[0] == "keys":
             app.vault.delete(parts[1])
             return self._send_json(200, {"keys": app.vault.status()})
+        if method == "GET" and parts == ["health"]:
+            return self._health()
         if method == "GET" and parts == ["runs"]:
-            return self._send_json(200, {"runs": app.store.list_runs()})
+            status = query.get("status", [None])[0]
+            search = query.get("q", [None])[0]
+            runs = app.store.list_runs(status=status or None, search=(search or "")[:MAX_TEXT] or None)
+            return self._send_json(200, {"runs": runs})
         if method == "POST" and parts == ["runs"]:
             return self._start_run()
         if len(parts) == 4 and parts[0] == "runs" and parts[2] == "approvals" and method == "POST":
@@ -192,6 +201,19 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and parts[2] == "step":
                 return self._set_step(run_id)
         self._send_json(404, {"error": "not found"})
+
+    def _health(self):
+        """Whether the server is up and its database answers. Needs the session token, like every API route."""
+        app = self.server.app
+        try:
+            app.store.list_runs(limit=1)
+            database = "ok"
+        except sqlite3.Error:
+            database = "error"
+        with app.lock:
+            active = app.active_count()
+        status = 200 if database == "ok" else 503
+        self._send_json(status, {"version": __version__, "database": database, "active_runs": active})
 
     def _trace(self, run_id):
         store = self.server.app.store
@@ -285,7 +307,7 @@ class Handler(BaseHTTPRequestHandler):
             app.store.add_event(run_id, "human", {"text": text})
             control.stop.clear()
             control.thread = run_in_background(
-                app.store, run_id, control.team, lambda: control.team.continue_run(text), control.secrets
+                app.store, run_id, control.team, lambda: control.team.continue_run(text), control.secrets, log=app.log
             )
         self._send_json(202, {"resumed": True})
 
@@ -321,7 +343,9 @@ class Handler(BaseHTTPRequestHandler):
             app.store.add_event(new_id, "branched", {"from_run": run_id, "turn": turn})
             app.store.add_event(new_id, "human", {"text": text})
             control.team, control.secrets = team, secrets
-            control.thread = run_in_background(app.store, new_id, team, lambda: team.continue_run(text), secrets)
+            control.thread = run_in_background(
+                app.store, new_id, team, lambda: team.continue_run(text), secrets, log=app.log
+            )
             app.runs[new_id] = control
         self._send_json(201, {"id": new_id})
 
@@ -345,7 +369,9 @@ class Handler(BaseHTTPRequestHandler):
             if app.workspaces:
                 self._review_for(run_id)  # a new run starts with nothing accepted yet
             control.team, control.secrets = team, secret_values
-            control.thread = run_in_background(app.store, run_id, team, lambda: team.run(goal), secret_values)
+            control.thread = run_in_background(
+                app.store, run_id, team, lambda: team.run(goal), secret_values, log=app.log
+            )
             app.runs[run_id] = control
         self._send_json(201, {"id": run_id})
 
@@ -373,7 +399,7 @@ class Handler(BaseHTTPRequestHandler):
             app.store.add_event(run_id, "human", {"text": text})
             control.stop.clear()
             control.thread = run_in_background(
-                app.store, run_id, control.team, lambda: control.team.continue_run(text), control.secrets
+                app.store, run_id, control.team, lambda: control.team.continue_run(text), control.secrets, log=app.log
             )
         self._send_json(202, {"resumed": True})
 
@@ -580,7 +606,10 @@ def serve(port=8765, data_dir="data"):
     store = Store(data / "agent_team.db")
     store.mark_interrupted()
     token = secrets.token_urlsafe(24)
-    server = Server(port, App(store, KeyVault(data), token, workspaces=data / "workspaces", baselines=data / "accepted"))
+    vault = KeyVault(data)
+    log = RunLog(data / "agent_team.log", secrets=vault.secret_values)
+    app = App(store, vault, token, workspaces=data / "workspaces", baselines=data / "accepted", log=log)
+    server = Server(port, app)
     print(f"Agent team is running. Open http://127.0.0.1:{server.server_port}/?token={token}")
     try:
         server.serve_forever()

@@ -219,13 +219,39 @@ class Store:
             ).fetchone()
         return dict(zip(RUN_COLUMNS, row)) if row else None
 
-    def list_runs(self, limit=50):
+    def list_runs(self, limit=50, status=None, search=None):
+        """Recent runs, with what each one spent: tokens and estimated cost summed over its turns, which includes
+        turns a rewind dropped, since they were paid for. cost is None when no turn had a price."""
+        clauses, params = [], []
+        if status:
+            clauses.append("r.status = ?")
+            params.append(status)
+        if search:
+            clauses.append("instr(lower(r.goal), lower(?)) > 0")
+            params.append(search)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self.lock:
             rows = self.db.execute(
-                "SELECT id, goal, status, created_at, finished_at FROM runs ORDER BY created_at DESC LIMIT ?",
-                (limit,),
+                f"""SELECT r.id, r.goal, r.status, r.created_at, r.finished_at,
+                       COALESCE(SUM(json_extract(e.data, '$.tokens')), 0),
+                       SUM(json_extract(e.data, '$.cost')),
+                       COUNT(json_extract(e.data, '$.cost'))
+                    FROM runs r LEFT JOIN events e ON e.run_id = r.id AND e.kind = 'turn'
+                    {where}
+                    GROUP BY r.id ORDER BY r.created_at DESC LIMIT ?""",
+                (*params, limit),
             ).fetchall()
-        return [dict(zip(RUN_COLUMNS, row)) for row in rows]
+        return [self._summary(row) for row in rows]
+
+    @staticmethod
+    def _summary(row):
+        run_id, goal, status, created_at, finished_at, tokens, cost, priced = row
+        return {
+            **dict(zip(RUN_COLUMNS, (run_id, goal, status, created_at, finished_at))),
+            "tokens": tokens,
+            "cost": cost if priced else None,
+            "duration_seconds": round(finished_at - created_at, 1) if finished_at else None,
+        }
 
     def current_version(self):
         with self.lock:

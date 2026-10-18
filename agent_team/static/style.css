@@ -135,6 +135,9 @@ summary { cursor: pointer; color: var(--muted); }
 
 .list { list-style: none; padding: 0; margin: 12px 0 0; }
 
+.run-filters { display: flex; flex-wrap: wrap; gap: 8px 12px; }
+.run-filters label { flex: 1 1 140px; }
+
 .list li {
   display: flex;
   flex-wrap: wrap;

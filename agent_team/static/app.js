@@ -328,18 +328,46 @@ function setLimit(key, value) {
 // ---------- runs ----------
 
 async function loadRuns() {
-  const { runs } = await api("GET", "/runs");
+  const status = $("run-filter").value;
+  const search = $("run-search").value.trim();
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  if (search) params.set("q", search);
+  const { runs } = await api("GET", `/runs?${params}`);
   const list = $("run-list");
   list.replaceChildren();
-  if (runs.length === 0) list.append(el("li", "No runs yet.", "muted"));
-  for (const run of runs) {
-    const item = el("li");
-    const open = el("button", `${run.goal.slice(0, 70)} (${run.status})`, "link");
-    open.addEventListener("click", () => openRun(run.id, run.goal, run.status));
-    item.append(open);
-    list.append(item);
-  }
+  if (runs.length === 0) list.append(el("li", status || search ? "No runs match." : "No runs yet.", "muted"));
+  for (const run of runs) list.append(runItem(run));
+  $("run-totals").textContent = runTotals(runs);
 }
+
+function runItem(run) {
+  const item = el("li");
+  const open = el("button", `${run.goal.slice(0, 70)} (${run.status})`, "link");
+  open.addEventListener("click", () => openRun(run.id, run.goal, run.status));
+  const parts = [`${run.tokens.toLocaleString()} tokens`];
+  parts.push(run.cost === null ? "no price set" : `about $${run.cost.toFixed(4)}`);
+  parts.push(run.duration_seconds === null ? "not finished" : `${run.duration_seconds}s`);
+  item.append(open, el("span", parts.join(" · "), "muted"));
+  return item;
+}
+
+function runTotals(runs) {
+  const tokens = runs.reduce((sum, run) => sum + run.tokens, 0);
+  const priced = runs.filter((run) => run.cost !== null);
+  const cost = priced.reduce((sum, run) => sum + run.cost, 0);
+  let text = `${runs.length} run${runs.length === 1 ? "" : "s"}, ${tokens.toLocaleString()} tokens`;
+  if (priced.length) text += `, about $${cost.toFixed(4)}`;
+  if (priced.length && priced.length < runs.length) text += ` (${runs.length - priced.length} without a price)`;
+  return text;
+}
+
+let runSearchTimer = null;
+$("run-filter").addEventListener("change", () => attempt(loadRuns));
+$("run-search").addEventListener("input", () => {
+  clearTimeout(runSearchTimer);
+  runSearchTimer = setTimeout(() => attempt(loadRuns), 250);
+});
 
 function openRun(id, goal, status) {
   const sameRun = state.runId === id;

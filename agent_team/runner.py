@@ -12,6 +12,7 @@ from .tools import GROUPS
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "default_team.json"
 DEFAULT_MAX_TOKENS = 200_000  # used when a config has no token budget; null in a config means no budget
+CONFIG_VERSION = 1  # the version this app reads; a config without a "version" field is read as version 1
 NAME_RULE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
@@ -21,6 +22,34 @@ class ConfigError(ValueError):
 
 def default_config():
     return json.loads(DEFAULT_CONFIG_PATH.read_text())
+
+
+def _check_version(config):
+    version = config.get("version", CONFIG_VERSION)
+    if version != CONFIG_VERSION:
+        raise ConfigError(f"config version {version} is not supported; this app reads version {CONFIG_VERSION}")
+
+
+def _prices(config):
+    """Per-model prices, keyed "provider/model" in the config and (provider, model) in the team."""
+    specs = config.get("prices", {})
+    if not isinstance(specs, dict):
+        raise ConfigError("prices must be an object keyed by provider/model")
+    prices = {}
+    for key, spec in specs.items():
+        provider, slash, model = key.partition("/")
+        if not slash or not provider or not model:
+            raise ConfigError(f"the price {key!r} must be named provider/model")
+        if not isinstance(spec, dict):
+            raise ConfigError(f"prices for {key!r} need input_per_million and output_per_million")
+        values = []
+        for field in ("input_per_million", "output_per_million"):
+            value = spec.get(field)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+                raise ConfigError(f"prices for {key!r}: {field} must be a number, zero or more")
+            values.append(float(value))
+        prices[(provider, model)] = tuple(values)
+    return prices
 
 
 def _check_member(spec, label):
@@ -90,6 +119,8 @@ def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None, save
     if not isinstance(config, dict):
         raise ConfigError("the team config must be a JSON object")
     refuse_secret_fields(config)
+    _check_version(config)
+    prices = _prices(config)
     try:
         lead_spec = config["lead"]
         teammate_specs = config["teammates"]
@@ -137,6 +168,7 @@ def build_team(config, lookup_key, emit, human_inbox=None, stop_event=None, save
         step_mode=_flag(config, "step_mode"),
         max_replans=_small_int(config, "max_replans", DEFAULT_MAX_REPLANS, 0, 5),
         stall_turns=_small_int(config, "stall_turns", DEFAULT_STALL_TURNS, 2, 20),
+        prices=prices,
         emit=emit,
         human_inbox=human_inbox,
         stop_event=stop_event,
@@ -160,8 +192,9 @@ def redact(text, secrets):
     return text
 
 
-def run_in_background(store, run_id, team, action, secrets):
-    """Run action() (which returns the answer, or None) on a thread. The run's final status goes to the store."""
+def run_in_background(store, run_id, team, action, secrets, log=None):
+    """Run action() (which returns the answer, or None) on a thread. The run's final status goes to the store, and
+    to the log when there is one."""
 
     def work():
         try:
@@ -170,10 +203,15 @@ def run_in_background(store, run_id, team, action, secrets):
                 store.add_event(run_id, "final", {"answer": answer})
             status = team.status
         except Exception as error:  # a failed provider call ends this run, not the server
-            store.add_event(run_id, "error", {"message": redact(str(error), secrets)})
+            message = redact(str(error), secrets)
+            store.add_event(run_id, "error", {"message": message})
             status = "failed"
+            if log:
+                log.write("run_failed", run=run_id, message=message)
         store.clear_live(run_id)
         store.finish_run(run_id, status)
+        if log:
+            log.write("run_finished", run=run_id, status=status, tokens=team.tokens_used)
 
     thread = threading.Thread(target=work, daemon=True, name=f"run-{run_id[:8]}")
     thread.start()

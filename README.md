@@ -34,6 +34,7 @@ The command prints a link with a session token. Open it in your browser. The pag
 - Send the lead a message during a run, or stop the run.
 - Continue a finished run by sending a message. This works after a server restart too, because the team's histories are saved after every turn.
 - Export a run as Markdown or JSON.
+- Look over past runs on a dashboard: status, tokens, estimated cost, and duration. Filter by status, or search the goal. Cost needs prices in the config (see Config).
 - Go back in time. The Turns row lists a checkpoint for every turn. Select one and write a message:
   - **Rewind here** puts the run back at that turn and continues with your message. It needs a finished run, and it asks you to confirm. Later turns are dropped from the checkpoints, but their events stay in the history.
   - **Branch from here** starts a new run from that turn. The original run is unchanged, and the new run gets a copy of its workspace.
@@ -54,6 +55,20 @@ agent-team run agent_team/default_team.json "Write a one-page guide to our relea
 ```
 
 `-v` prints each message between agents to stderr. The final answer goes to stdout. Copy `agent_team/default_team.json` to edit a team.
+
+### Config
+
+A team config is JSON with `"version": 1`, the only version this app reads. A config with another version is refused with a message. A config without a version is read as version 1.
+
+Prices are optional. They are per million tokens, keyed by provider and model. The numbers below are examples, so use your provider's current price list:
+
+```json
+"prices": {
+  "anthropic/claude-haiku-5-5": { "input_per_million": 1.00, "output_per_million": 5.00 }
+}
+```
+
+Cost is input tokens times the input price, plus output tokens times the output price, summed over the run's turns. Turns from a rewound part of a run still count, since they were paid for. A run whose models have no price shows "no price set" in the dashboard. The figure is an estimate from these numbers, not billing data.
 
 ### Team members and tools
 
@@ -95,17 +110,23 @@ Running code is not available. Model-written code would run on your machine, so 
 - A stream that fails before any output is retried. One that fails after output has started is not, so no tokens are billed twice. A stream that ends early is reported as an error, not as a short reply.
 - Limits stop runaway runs, and the run status says which one applied: `max_turns`, `max_seconds` (`timeout`), `max_tokens` (`token_budget`), a repeated turn (`stalled`), `no_progress`, `stopped`, `failed`, `idle` when no one has anything left to do, or `interrupted` after a restart.
 
+### Operations
+
+- `GET /api/health` (with the session token) reports the version, whether the database answers, and how many runs are active. It returns 503 when the database does not answer.
+- `data/agent_team.log` is a log with one JSON object per line. A line is written when a run finishes, with its status and tokens, and when a run fails. Keys are replaced with `[redacted]` before a line is written. The log is not rotated.
+
 ### Tests
 
 ```bash
 python -m unittest discover -s tests
 ```
 
-The tests use scripted replies and local stub servers, so they don't call any real API. The browser tests need Playwright and a Chromium binary, and skip themselves when either is missing. Set `AGENT_TEAM_CHROME` to choose the Chromium binary.
+The tests use scripted replies and local stub servers, so they don't call any real API. The browser tests need Playwright and a Chromium binary, and skip themselves when either is missing. Set `AGENT_TEAM_CHROME` to choose the Chromium binary. The package test builds a wheel with pip, installs it into an empty folder, and checks the default team from there.
 
 ### Known limits
 
 - Only one server can use a data directory at a time. The lock is an OS file lock. It is not enforced on Windows, where you must run one server per data directory yourself.
 - Replies stream. The page shows the end of each agent's reply while it arrives. That live text is not saved, so after a reconnect it shows only what is streaming at that moment. The saved feed shows the full message once the turn ends.
+- Cost figures are estimates from the prices in the config. A config with a version other than 1 is refused when a run starts, including a preset that holds one.
 - The `openai_compatible` provider needs a server with tool calling. Chat-only servers fail. Streaming also asks for token usage with `stream_options`. A server that rejects that option will fail the request.
 - The fetch tool checks an address before connecting. A name whose address changes between the check and the connection could still reach a private address. Treat fetch as reading public pages, not as a hardened proxy.
